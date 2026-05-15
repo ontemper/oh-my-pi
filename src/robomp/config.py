@@ -48,6 +48,14 @@ class Settings(BaseSettings):
     gh_proxy_bind_host: str = Field("0.0.0.0", alias="ROBOMP_GH_PROXY_BIND_HOST")
     gh_proxy_bind_port: int = Field(8081, alias="ROBOMP_GH_PROXY_BIND_PORT")
 
+    # gh-proxy: maximum request body size (bytes). Bodies larger than this
+    # are rejected with 413 BEFORE the proxy reads them into memory. Tight
+    # by design — every typed endpoint payload fits in a few KB.
+    gh_proxy_max_body_bytes: int = Field(1 << 20, alias="ROBOMP_GH_PROXY_MAX_BODY_BYTES")
+    # Hard wall-clock budget (seconds) for a single git subprocess invoked
+    # by gh-proxy. Bounds how long a hung git can pin a request handler.
+    gh_proxy_git_timeout_seconds: float = Field(60.0, alias="ROBOMP_GH_PROXY_GIT_TIMEOUT_SECONDS")
+
     # Model selection
     model: str = Field("p-anthropic/claude-sonnet-4-6", alias="ROBOMP_MODEL")
     provider: str | None = Field(None, alias="ROBOMP_PROVIDER")
@@ -276,3 +284,68 @@ def get_settings() -> Settings:
 def reset_settings_cache() -> None:
     """Invalidate the cached settings (tests)."""
     get_settings.cache_clear()
+
+
+class _ProxyEnvLoader(BaseSettings):
+    """Minimal env loader for `python -m robomp.proxy serve`.
+
+    Validates only the fields the gh-proxy container actually needs
+    (PAT, HMAC key, bind address, paths). Keeping this separate from the
+    orchestrator-mode `Settings()` ctor avoids dragging in
+    `_validate_proxy_or_pat` and friends, which would reject a perfectly
+    valid proxy deployment (no webhook secret, no bot_login, no proxy URL)
+    before `serve()` can give a specific error.
+    """
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        case_sensitive=False,
+    )
+
+    github_token: SecretStr = Field(..., alias="GITHUB_TOKEN")
+    gh_proxy_hmac_key: SecretStr = Field(..., alias="ROBOMP_GH_PROXY_HMAC_KEY")
+    gh_proxy_bind_host: str = Field("0.0.0.0", alias="ROBOMP_GH_PROXY_BIND_HOST")
+    gh_proxy_bind_port: int = Field(8081, alias="ROBOMP_GH_PROXY_BIND_PORT")
+    workspace_root: Path = Field(Path("./data/workspaces"), alias="ROBOMP_WORKSPACE_ROOT")
+    log_dir: Path = Field(Path("./data/logs"), alias="ROBOMP_LOG_DIR")
+    gh_proxy_max_body_bytes: int = Field(1 << 20, alias="ROBOMP_GH_PROXY_MAX_BODY_BYTES")
+    gh_proxy_git_timeout_seconds: float = Field(60.0, alias="ROBOMP_GH_PROXY_GIT_TIMEOUT_SECONDS")
+
+    @field_validator("github_token", "gh_proxy_hmac_key", mode="before")
+    @classmethod
+    def _reject_blank(cls, value: object) -> object:
+        if isinstance(value, str) and not value.strip():
+            raise ValueError("must be a non-empty string")
+        if hasattr(value, "get_secret_value"):
+            inner = value.get_secret_value()  # type: ignore[attr-defined]
+            if isinstance(inner, str) and not inner.strip():
+                raise ValueError("must be a non-empty string")
+        return value
+
+
+def load_proxy_settings() -> Settings:
+    """Build a `Settings` instance suitable for the gh-proxy process.
+
+    Only the env vars the proxy actually consumes are required; the
+    orchestrator-only fields (webhook secret, bot_login, …) are set to
+    inert placeholders since `proxy.server` never reads them. Skips the
+    `Settings()` cross-field validator (which presumes orchestrator
+    semantics) by routing through `model_construct`.
+    """
+    loader = _ProxyEnvLoader()  # type: ignore[call-arg]
+    return Settings.model_construct(
+        github_token=loader.github_token,
+        github_webhook_secret=SecretStr(""),
+        bot_login="gh-proxy",
+        git_author_email="gh-proxy@invalid",
+        gh_proxy_url=None,
+        gh_proxy_hmac_key=loader.gh_proxy_hmac_key,
+        gh_proxy_bind_host=loader.gh_proxy_bind_host,
+        gh_proxy_bind_port=loader.gh_proxy_bind_port,
+        workspace_root=loader.workspace_root,
+        log_dir=loader.log_dir,
+        gh_proxy_max_body_bytes=loader.gh_proxy_max_body_bytes,
+        gh_proxy_git_timeout_seconds=loader.gh_proxy_git_timeout_seconds,
+    )

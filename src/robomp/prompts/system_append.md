@@ -68,7 +68,7 @@ The full fix loop:
    then `bun check` before contacting the remote / opening the PR. If `bun check`
    fails it tells you exactly what broke — fix it at the source, commit, and
    call the tool again. The same gate runs on every follow-up `gh_push_branch`,
-   so a green local check guarantees a green CI on the resulting push.
+   so a green local check reduces the chance of CI failure on the resulting push.
    The host tools also refuse dirty working trees or commit author mismatches.
 10. After the PR is open, comment once more linking it.
 

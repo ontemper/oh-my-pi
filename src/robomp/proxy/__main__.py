@@ -7,14 +7,21 @@ import sys
 import click
 import uvicorn
 
-from robomp.config import Settings, get_settings
+from robomp.config import Settings, load_proxy_settings
 from robomp.logging_config import configure_logging
 from robomp.proxy.server import create_proxy_app
 
 
 def _settings_or_die() -> Settings:
+    """Load proxy-only settings, surfacing config errors as exit code 2.
+
+    Routes through `load_proxy_settings` (NOT the orchestrator `Settings()`
+    ctor) so the gh-proxy container only needs `GITHUB_TOKEN` +
+    `ROBOMP_GH_PROXY_HMAC_KEY` — the orchestrator's webhook secret,
+    bot_login, and proxy-URL fields are irrelevant here.
+    """
     try:
-        return get_settings()
+        return load_proxy_settings()
     except Exception as exc:
         click.echo(f"gh-proxy configuration error: {exc}", err=True)
         sys.exit(2)
@@ -31,6 +38,8 @@ def serve() -> None:
     cfg = _settings_or_die()
     configure_logging(cfg.log_dir)
     cfg.ensure_paths()
+    # `load_proxy_settings` already rejects blank values, but stay defensive
+    # in case a caller constructs the Settings by hand.
     if cfg.github_token is None:
         click.echo("gh-proxy: GITHUB_TOKEN is required in proxy mode", err=True)
         sys.exit(2)

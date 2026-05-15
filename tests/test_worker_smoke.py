@@ -75,7 +75,7 @@ def test_triage_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
 
     monkeypatch.setenv("ROBOMP_GH_PROXY_URL", "http://gh-proxy.invalid:8081")
     monkeypatch.setenv("ROBOMP_GH_PROXY_HMAC_KEY", "test-hmac-key-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setenv("GITHUB_TOKEN", "")
     monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", "secret")
     monkeypatch.setenv("ROBOMP_BOT_LOGIN", "robomp-bot")
     monkeypatch.setenv("ROBOMP_REPO_ALLOWLIST", "octo/widget")

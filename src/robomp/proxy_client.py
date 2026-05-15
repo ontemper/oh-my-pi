@@ -72,8 +72,16 @@ def _decode_error(resp: httpx.Response) -> Exception:
 # ---------- signing helpers ----------
 
 
-def _signed_headers(method: str, path: str, body: bytes, key: bytes) -> dict[str, str]:
-    ts, sig = sign(method=method, path=path, body=body, key=key)
+def _signed_headers(method: str, target: str, body: bytes, key: bytes) -> dict[str, str]:
+    """Return signing headers for an already-canonicalized request target.
+
+    `target` is `path` for query-less requests and `path?query` for GETs
+    that carry parameters. It MUST byte-for-byte match the server-side
+    `_request_target(request)` so HMAC verification succeeds — that's why
+    the async path below builds an `httpx.Request` first and reads the
+    encoded URL back out rather than re-encoding params here.
+    """
+    ts, sig = sign(method=method, path=target, body=body, key=key)
     return {HEADER_TIMESTAMP: ts, HEADER_SIGNATURE: sig}
 
 
@@ -117,17 +125,25 @@ class GitHubProxyClient:
         json_body: Mapping[str, Any] | None = None,
     ) -> Any:
         body_bytes = b"" if json_body is None else json.dumps(json_body).encode("utf-8")
-        headers = _signed_headers(method, path, body_bytes, self._key)
-        if json_body is not None:
-            headers["Content-Type"] = "application/json"
         async with self._async_client() as client:
-            resp = await client.request(
+            # Build the request first so httpx canonicalizes the URL once;
+            # we then sign against the encoded query string the wire will
+            # carry. Signing before this point would mean re-implementing
+            # httpx's param encoding, with a high risk of byte-level drift
+            # from the server's `request.url.query`.
+            req = client.build_request(
                 method,
                 path,
                 params=params,
                 content=body_bytes if json_body is not None else None,
-                headers=headers,
             )
+            target = req.url.path
+            if req.url.query:
+                target = f"{target}?{req.url.query.decode('ascii')}"
+            req.headers.update(_signed_headers(method, target, body_bytes, self._key))
+            if json_body is not None:
+                req.headers["Content-Type"] = "application/json"
+            resp = await client.send(req)
         if resp.status_code >= 400:
             raise _decode_error(resp)
         if resp.status_code == 204 or not resp.content:

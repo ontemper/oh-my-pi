@@ -183,9 +183,11 @@ async def test_signed_headers_present_and_verify() -> None:
     ts = req.headers.get(HEADER_TIMESTAMP)
     sig = req.headers.get(HEADER_SIGNATURE)
     assert ts is not None and sig is not None
+    raw_query = req.url.query.decode("ascii")
+    target = f"{req.url.path}?{raw_query}" if raw_query else req.url.path
     result = verify(
         method=req.method,
-        path=req.url.path,
+        path=target,
         body=req.content or b"",
         timestamp=ts,
         signature=sig,

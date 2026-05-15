@@ -65,12 +65,24 @@ def _basic_auth_header(token: str) -> str:
     return f"Authorization: Basic {base64.b64encode(raw).decode('ascii')}"
 
 
+_DEFAULT_GIT_TIMEOUT_SECONDS = 120.0
+"""Hard wall-clock cap on any one `git` invocation. Overridable per-call.
+
+A hung child (auth prompt, network stall, server-side packfile generation
+that never finishes) MUST NOT pin the calling thread forever — especially
+when the gh-proxy invokes `_run_git` from an executor and bounds its OWN
+wait via `asyncio.wait_for`. The asyncio bound returns control to the
+event loop, but only this `timeout=` + kill below frees the OS process.
+"""
+
+
 def _run_git(
     args: list[str],
     *,
     cwd: Path | None,
     token: str | None,
     extra_env: Mapping[str, str] | None = None,
+    timeout: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run `git <args>` with optional PAT injection via `--config-env`.
 
@@ -78,6 +90,11 @@ def _run_git(
     returns the same shape; callers either `_check` it or inspect manually
     (e.g. when probing for ref existence). Stdout/stderr are always
     credential-redacted before being returned.
+
+    On `timeout` expiry the child (and any descendants spawned by git's
+    helpers) is killed and `GitCommandError` is raised with a synthetic
+    returncode (124, matching coreutils `timeout`). `None` uses
+    `_DEFAULT_GIT_TIMEOUT_SECONDS`.
     """
     env: dict[str, str] = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
     if extra_env:
@@ -88,14 +105,25 @@ def _run_git(
         cmd.extend(["--config-env", f"http.extraHeader={AUTH_ENV_VAR}"])
     cmd.extend(args)
     log.debug("git", extra={"cmd": _redacted_cmd(cmd), "cwd": str(cwd) if cwd else None})
-    proc = subprocess.run(
-        cmd,
-        cwd=str(cwd) if cwd else None,
-        env=env,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    effective_timeout = _DEFAULT_GIT_TIMEOUT_SECONDS if timeout is None else timeout
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=str(cwd) if cwd else None,
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=effective_timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        # `subprocess.run` already kills the direct child when the timeout
+        # fires, but we explicitly re-raise as `GitCommandError` so callers
+        # don't have to special-case `TimeoutExpired` alongside the regular
+        # non-zero-exit error path. 124 mirrors GNU `timeout`.
+        stdout = redact_credentials(exc.stdout or "") if isinstance(exc.stdout, str) else ""
+        stderr_msg = f"git timed out after {effective_timeout:.0f}s: {' '.join(_redacted_cmd(cmd))}"
+        raise GitCommandError(cmd, 124, stdout, stderr_msg) from exc
     if proc.stdout:
         proc.stdout = redact_credentials(proc.stdout)
     if proc.stderr:
@@ -190,12 +218,21 @@ def push(
     expected_head: str | None,
     token: str | None,
 ) -> PushResult:
-    """`git push --force-with-lease --set-upstream origin <branch>` from `repo_dir`.
+    """`git push --force-with-lease=<ref>:<sha> --set-upstream origin <branch>` from `repo_dir`.
 
-    `--force-with-lease` lets us recover from local history rewrites (e.g. the
-    agent doing `git commit --amend --reset-author --no-edit` to fix author
-    identity) while still refusing the push if origin has moved since our last
-    fetch — i.e. it never clobbers work the bot didn't see.
+    The lease is pinned to whatever SHA the local `refs/remotes/origin/<branch>`
+    currently records — i.e. what the workspace last fetched. The push only
+    succeeds if origin's `<branch>` still matches that SHA, so a parallel
+    writer to the same ref (between our last fetch and this push) is detected
+    and refused even when the push is a fast-forward of HEAD. For a brand-new
+    branch the local remote-tracking ref is absent, so the lease expects "no
+    ref on origin" (empty expected value).
+
+    `--force-with-lease` (vs plain `--force`) lets us recover from local
+    history rewrites (e.g. the agent doing `git commit --amend --reset-author
+    --no-edit` to fix author identity) while still refusing the push if origin
+    has moved since our last fetch — i.e. it never clobbers work the bot
+    didn't see.
 
     When `expected_head` is supplied, this verifies the *local* HEAD matches
     before pushing — anything else means an unexpected commit raced in inside
@@ -211,7 +248,17 @@ def push(
             "",
             f"HEAD changed since preflight ({expected_head[:12]} → {head[:12]}); aborting push.",
         )
-    args = ["push", "--force-with-lease", "--set-upstream", "origin", branch]
+    # Probe the local remote-tracking ref. Missing → first push; we pin the
+    # lease to the empty value so the push only succeeds if origin still has
+    # no `<branch>`. Present → pin to that SHA.
+    probe = _run_git(
+        ["rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{branch}"],
+        cwd=repo_dir,
+        token=None,
+    )
+    expected_remote = probe.stdout.strip() if probe.returncode == 0 else ""
+    lease = f"--force-with-lease=refs/heads/{branch}:{expected_remote}"
+    args = ["push", lease, "--set-upstream", "origin", branch]
     _check(_run_git(args, cwd=repo_dir, token=token), ["git", *args])
     return PushResult(head=head, branch=branch)
 

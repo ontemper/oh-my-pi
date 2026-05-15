@@ -116,9 +116,28 @@ def _bare_has_branch(bare: Path, branch: str) -> bool:
 
 
 def _signed(
-    method: str, path: str, body: bytes = b"", *, ts: str | None = None, key: bytes | None = None
+    method: str,
+    path: str,
+    body: bytes = b"",
+    *,
+    params: dict[str, object] | None = None,
+    ts: str | None = None,
+    key: bytes | None = None,
 ) -> dict[str, str]:
-    timestamp, sig = sign(method=method, path=path, body=body, key=key or _HMAC.encode(), timestamp=ts)
+    """Build signed headers.
+
+    When `params` is supplied, the canonical signing target becomes
+    `path?<query>` (matching the verifier's request-target reconstruction),
+    so signed requests with query strings stay verifiable AND mutating any
+    query parameter post-sign produces a 401.
+    """
+    if params:
+        url = httpx.URL(path, params=params)
+        query = url.query.decode("ascii") if url.query else ""
+        target = f"{path}?{query}" if query else path
+    else:
+        target = path
+    timestamp, sig = sign(method=method, path=target, body=body, key=key or _HMAC.encode(), timestamp=ts)
     return {HEADER_TIMESTAMP: timestamp, HEADER_SIGNATURE: sig}
 
 
@@ -220,7 +239,7 @@ async def test_get_repo(proxy_settings: Settings) -> None:
         resp = await client.get(
             "/gh/v1/repo",
             params={"repo": "octo/widget"},
-            headers=_signed("GET", "/gh/v1/repo"),
+            headers=_signed("GET", "/gh/v1/repo", params={"repo": "octo/widget"}),
         )
     assert resp.status_code == 200
     assert resp.json() == {
@@ -251,7 +270,7 @@ async def test_get_issue(proxy_settings: Settings) -> None:
         resp = await client.get(
             "/gh/v1/issue",
             params={"repo": "octo/widget", "number": 1},
-            headers=_signed("GET", "/gh/v1/issue"),
+            headers=_signed("GET", "/gh/v1/issue", params={"repo": "octo/widget", "number": 1}),
         )
     assert resp.status_code == 200
     payload = resp.json()
@@ -293,7 +312,7 @@ async def test_list_issues(proxy_settings: Settings) -> None:
         resp = await client.get(
             "/gh/v1/issues",
             params={"repo": "octo/widget"},
-            headers=_signed("GET", "/gh/v1/issues"),
+            headers=_signed("GET", "/gh/v1/issues", params={"repo": "octo/widget"}),
         )
     assert resp.status_code == 200
     items = resp.json()["items"]
@@ -316,7 +335,7 @@ async def test_list_comments(proxy_settings: Settings) -> None:
         resp = await client.get(
             "/gh/v1/comments",
             params={"repo": "octo/widget", "number": 1},
-            headers=_signed("GET", "/gh/v1/comments"),
+            headers=_signed("GET", "/gh/v1/comments", params={"repo": "octo/widget", "number": 1}),
         )
     assert resp.status_code == 200
     assert resp.json() == {
@@ -346,7 +365,7 @@ async def test_list_review_comments(proxy_settings: Settings) -> None:
         resp = await client.get(
             "/gh/v1/review_comments",
             params={"repo": "octo/widget", "pr_number": 1},
-            headers=_signed("GET", "/gh/v1/review_comments"),
+            headers=_signed("GET", "/gh/v1/review_comments", params={"repo": "octo/widget", "pr_number": 1}),
         )
     assert resp.status_code == 200
     items = resp.json()["items"]
@@ -377,7 +396,7 @@ async def test_list_pr_reviews(proxy_settings: Settings) -> None:
         resp = await client.get(
             "/gh/v1/pr_reviews",
             params={"repo": "octo/widget", "pr_number": 1},
-            headers=_signed("GET", "/gh/v1/pr_reviews"),
+            headers=_signed("GET", "/gh/v1/pr_reviews", params={"repo": "octo/widget", "pr_number": 1}),
         )
     assert resp.status_code == 200
     items = resp.json()["items"]
@@ -643,3 +662,140 @@ async def test_git_push_workspace_key_mismatch(proxy_settings: Settings) -> None
         )
     assert resp.status_code == 400
     assert "workspace_key" in resp.text
+
+
+# ============================================================================
+# Finding 2 — HMAC must bind the raw query string
+# ============================================================================
+
+
+async def test_hmac_rejects_query_mutation(proxy_settings: Settings) -> None:
+    """Sign `/gh/v1/issue?repo=octo/widget&number=1`, replay with number=2.
+
+    The verifier MUST notice the mutated query and 401. Without binding the
+    query into the canonical string this request would sail through with an
+    attacker-chosen target issue.
+    """
+    captured: list[httpx.Request] = []
+
+    def gh(req: httpx.Request) -> httpx.Response:
+        captured.append(req)
+        return httpx.Response(
+            200,
+            json={
+                "number": int(req.url.params["number"]),
+                "title": "T", "body": "B", "state": "open",
+                "user": {"login": "x"}, "labels": [],
+            },
+        )
+
+    app = _build_app(proxy_settings, gh)
+    legit_params = {"repo": "octo/widget", "number": 1}
+    headers = _signed("GET", "/gh/v1/issue", params=legit_params)
+    mutated = {"repo": "octo/widget", "number": 2}
+    async with await _async_client(app) as client:
+        resp = await client.get("/gh/v1/issue", params=mutated, headers=headers)
+    assert resp.status_code == 401, resp.text
+    # Upstream GitHub mock MUST NOT have been called — auth failed first.
+    assert captured == []
+
+
+# ============================================================================
+# Finding 3 — body must be size-capped BEFORE auth / before full buffer
+# ============================================================================
+
+
+async def test_oversized_content_length_rejected_with_413(proxy_settings: Settings) -> None:
+    """Setting Content-Length above the cap is rejected at 413 cheaply.
+
+    With the fix in place the proxy never reads the (huge) body into memory:
+    we declare CL > max_bytes and the handler aborts immediately. We force
+    a tiny cap so the test stays fast; the production default is 1 MiB.
+    """
+    proxy_settings.gh_proxy_max_body_bytes = 256  # type: ignore[misc]
+    app = _build_app(proxy_settings, lambda _: httpx.Response(500, json={}))
+    payload = b"x" * 1024
+    headers = {
+        **_signed("POST", "/gh/v1/post_comment", payload),
+        "Content-Type": "application/json",
+        # Lie about CL to prove the early-reject path doesn't read content.
+        "Content-Length": str(1024 * 1024 * 64),
+    }
+    async with await _async_client(app) as client:
+        resp = await client.post("/gh/v1/post_comment", content=payload, headers=headers)
+    assert resp.status_code == 413, resp.text
+
+
+async def test_streamed_body_above_cap_rejected_with_413(proxy_settings: Settings) -> None:
+    """When Content-Length is honest but > cap, we still 413."""
+    proxy_settings.gh_proxy_max_body_bytes = 64  # type: ignore[misc]
+    app = _build_app(proxy_settings, lambda _: httpx.Response(500, json={}))
+    payload = b'{"repo":"octo/widget","number":1,"body":"' + (b"y" * 200) + b'"}'
+    headers = {
+        **_signed("POST", "/gh/v1/post_comment", payload),
+        "Content-Type": "application/json",
+    }
+    async with await _async_client(app) as client:
+        resp = await client.post("/gh/v1/post_comment", content=payload, headers=headers)
+    assert resp.status_code == 413
+
+
+# ============================================================================
+# Finding 5 — push refuses attacker-controlled origin (PAT exfil guard)
+# ============================================================================
+
+
+async def test_git_push_rejects_attacker_origin(
+    proxy_settings: Settings, upstream_repo: Path
+) -> None:
+    """If the worktree's origin is rewritten to a non-github HTTPS URL,
+    the push endpoint MUST refuse with 400 BEFORE invoking `git push` (which
+    would carry the PAT to the attacker's host)."""
+    branch = "farm/abc/evil"
+    repo_dir, head = _stage_workspace(proxy_settings, upstream_repo, "octo/widget", 1, branch)
+    # Simulate the agent rewriting origin inside its sandbox worktree.
+    _git(["-C", str(repo_dir), "remote", "set-url", "origin", "https://evil.example.com/octo/widget.git"], repo_dir)
+
+    app = _build_app(proxy_settings)
+    body = (
+        b'{"repo":"octo/widget","workspace_key":"octo__widget__1","branch":"'
+        + branch.encode()
+        + b'","expected_head":"'
+        + head.encode()
+        + b'"}'
+    )
+    async with await _async_client(app) as client:
+        resp = await client.post(
+            "/gh/v1/git/push",
+            content=body,
+            headers={**_signed("POST", "/gh/v1/git/push", body), "Content-Type": "application/json"},
+        )
+    assert resp.status_code == 400, resp.text
+    # The legit upstream never received the branch — proves push wasn't run.
+    assert not _bare_has_branch(upstream_repo, branch)
+
+
+async def test_git_push_rejects_origin_with_wrong_repo(
+    proxy_settings: Settings, upstream_repo: Path
+) -> None:
+    """github.com host is not enough — owner/repo MUST match the request."""
+    branch = "farm/abc/mismatch"
+    repo_dir, head = _stage_workspace(proxy_settings, upstream_repo, "octo/widget", 1, branch)
+    _git(["-C", str(repo_dir), "remote", "set-url", "origin", "https://github.com/attacker/other.git"], repo_dir)
+
+    app = _build_app(proxy_settings)
+    body = (
+        b'{"repo":"octo/widget","workspace_key":"octo__widget__1","branch":"'
+        + branch.encode()
+        + b'","expected_head":"'
+        + head.encode()
+        + b'"}'
+    )
+    async with await _async_client(app) as client:
+        resp = await client.post(
+            "/gh/v1/git/push",
+            content=body,
+            headers={**_signed("POST", "/gh/v1/git/push", body), "Content-Type": "application/json"},
+        )
+    assert resp.status_code == 400, resp.text
+    assert not _bare_has_branch(upstream_repo, branch)
