@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ## [17.0.1] - 2026-07-16
+### Added
+
+- Added optional `agentRegistry` / `agentLifecycleManager` injection through the task-execution path. This way, hosts embedding multiple sessions in one process can scope subagent identity, IRC roster, and park/revive lifecycle per session instead of sharing the process-global registry. Both options default to `AgentRegistry.global()` / `AgentLifecycleManager.global()`, so CLI behavior is unchanged.
+- Added a `generate_image.enabled` setting (Settings › Tools › Generate Image) so the image generation tool can be toggled like every other tool ([#5305](https://github.com/can1357/oh-my-pi/issues/5305))
 
 ### Changed
 

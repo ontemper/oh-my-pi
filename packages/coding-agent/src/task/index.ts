@@ -581,6 +581,11 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		this.#discoveredAgents = discoveredAgents;
 	}
 
+	/** Registry this session's subagents live in. */
+	get #agentRegistry(): AgentRegistry {
+		return this.session.agentRegistry ?? AgentRegistry.global();
+	}
+
 	#isBatchEnabled(): boolean {
 		return this.session.settings.get("task.batch");
 	}
@@ -929,7 +934,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			options;
 		const buildFollowUpHint = (aborted: boolean): string => {
 			if (aborted) {
-				const status = AgentRegistry.global().get(agentId)?.status;
+				const status = this.#agentRegistry.get(agentId)?.status;
 				if (status === "idle" || status === "parked") {
 					const followUp = ircEnabled ? "message it via `hub` to resume; " : "";
 					return `\n\n${agentId} was stopped but is still resumable — ${followUp}transcript at history://${agentId}`;
@@ -1023,7 +1028,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					const statusText = `Background task ${agentId} failed.`;
 					await reportProgress(statusText);
 					const message = error instanceof Error ? error.message : String(error);
-					const hint = AgentRegistry.global().get(agentId) ? buildFollowUpHint(false) : "";
+					const hint = this.#agentRegistry.get(agentId) ? buildFollowUpHint(false) : "";
 					throw new TaskJobError(`${message}${hint}`);
 				} finally {
 					releasePermit();
@@ -1417,6 +1422,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 
 			const sharedRunOptions = {
 				cwd: this.session.cwd,
+				agentRegistry: this.session.agentRegistry,
+				agentLifecycleManager: this.session.agentLifecycleManager,
 				agent: effectiveAgent,
 				task: renderSubagentUserPrompt(assignment),
 				assignment,
@@ -1580,7 +1587,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		}
 		// A stopped-but-adopted agent (soft-budget stop) stays messageable; tell
 		// the parent so it can resume via irc instead of redoing the work.
-		const refStatus = AgentRegistry.global().get(result.id)?.status;
+		const refStatus = this.#agentRegistry.get(result.id)?.status;
 		const resumable = result.aborted && (refStatus === "idle" || refStatus === "parked");
 		const summary = prompt.render(taskSummaryTemplate, {
 			agentName: result.agent,

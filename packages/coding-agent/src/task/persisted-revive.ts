@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
 import { MCPManager } from "../mcp/manager";
-import type { PersistedSubagentReviverFactory } from "../registry/agent-lifecycle";
+import type { AgentLifecycleManager, PersistedSubagentReviverFactory } from "../registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { createAgentSession } from "../sdk";
 import type { AgentSession } from "../session/agent-session";
@@ -24,6 +24,10 @@ export interface PersistedSubagentReviveContext {
 	settings: Settings;
 	/** LSP policy of the top-level session; revived subagents inherit it rather than defaulting on. */
 	enableLsp: boolean;
+	/** Registry the revived subagent re-registers into. Default: AgentRegistry.global(). */
+	agentRegistry?: AgentRegistry;
+	/** Lifecycle manager that owns the revived agent. Default: AgentLifecycleManager.global(). */
+	agentLifecycleManager?: AgentLifecycleManager;
 }
 
 /**
@@ -45,7 +49,7 @@ export interface PersistedSubagentReviveContext {
 export function createPersistedSubagentReviverFactory(
 	ctx: PersistedSubagentReviveContext,
 ): PersistedSubagentReviverFactory {
-	const registry = AgentRegistry.global();
+	const registry = ctx.agentRegistry ?? AgentRegistry.global();
 	return async ref => {
 		const sessionFile = ref.sessionFile;
 		if (!sessionFile) return undefined;
@@ -85,6 +89,8 @@ export function createPersistedSubagentReviverFactory(
 			const mcpProxyTools = mcpManager ? createMCPProxyTools(mcpManager) : [];
 			const { session } = await createAgentSession({
 				cwd: ctx.session.sessionManager.getCwd(),
+				agentRegistry: registry,
+				agentLifecycleManager: ctx.agentLifecycleManager,
 				authStorage: ctx.authStorage,
 				modelRegistry: ctx.modelRegistry,
 				settings: createSubagentSettings(

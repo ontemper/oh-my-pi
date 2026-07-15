@@ -501,6 +501,8 @@ export interface CreateAgentSessionOptions {
 	agentDisplayName?: string;
 	/** Optional shared agent registry for IRC routing. Default: AgentRegistry.global(). */
 	agentRegistry?: AgentRegistry;
+	/** Optional lifecycle manager for park/revive of kept-alive subagents; must be built on the same registry as `agentRegistry`. Default: AgentLifecycleManager.global(). */
+	agentLifecycleManager?: AgentLifecycleManager;
 	/** Parent task ID prefix for nested artifact naming (e.g., "Extensions") */
 	parentTaskPrefix?: string;
 	/**
@@ -1508,6 +1510,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const scopedAsyncJobManager = asyncJobManager ?? (options.parentTaskPrefix ? AsyncJobManager.instance() : undefined);
 
 	const agentRegistry = options.agentRegistry ?? AgentRegistry.global();
+	const agentLifecycleManager = options.agentLifecycleManager ?? AgentLifecycleManager.global();
 	const resolvedAgentId = options.agentId ?? options.parentTaskPrefix ?? MAIN_AGENT_ID;
 	const resolvedAgentDisplayName =
 		options.agentDisplayName ?? ((options.taskDepth ?? 0) > 0 || options.parentTaskPrefix ? "sub" : "main");
@@ -1519,7 +1522,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	 */
 	const unregisterUnlessParked = (): void => {
 		if (agentRegistry.get(resolvedAgentId)?.status === "parked") return;
-		if (AgentLifecycleManager.global().isParking(resolvedAgentId)) return;
+		if (agentLifecycleManager.isParking(resolvedAgentId)) return;
 		agentRegistry.unregister(resolvedAgentId);
 	};
 	const evalKernelOwnerId = `agent-session:${Snowflake.next()}`;
@@ -1580,6 +1583,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			getAgentId: () => resolvedAgentId,
 			getToolByName: name => session?.getToolByName(name),
 			agentRegistry,
+			agentLifecycleManager,
 			getSessionSpawns: () => options.spawns ?? "*",
 			getModelString: () => (hasExplicitModel && model ? formatModelString(model) : undefined),
 			getActiveModelString,
@@ -2816,11 +2820,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					// AgentSession.dispose() would otherwise set its guards.
 					session.beginDispose();
 					if (agentKind === "main") {
-						// Top-level teardown owns the global agent lifecycle: park timers,
+						// Top-level teardown owns the session's agent lifecycle: park timers,
 						// adopted subagent sessions, revivers. Tear it down while shared
 						// resources (kernels, MCP, LSP) are still live. Subagent disposal
-						// must NOT touch the global lifecycle.
-						await AgentLifecycleManager.global().dispose();
+						// must NOT touch the shared lifecycle.
+						await agentLifecycleManager.dispose();
 					}
 					await originalDispose();
 				} finally {
