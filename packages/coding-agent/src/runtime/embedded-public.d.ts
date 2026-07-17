@@ -70,7 +70,10 @@ export const kNoAuth: string;
 
 export class ModelRegistry {
 	constructor(authStorage: AuthStorage, modelsPath: string);
-	registerProvider(provider: string, config: { api: string; apiKey: string; baseUrl?: string }): void;
+	registerProvider(
+		provider: string,
+		config: { api: string; apiKey: string; baseUrl?: string; models?: readonly unknown[] },
+	): void;
 }
 
 export class Settings {
