@@ -1,4 +1,5 @@
 import type { StreamFn } from "@oh-my-pi/pi-agent-core";
+import type { CustomTool } from "../extensibility/custom-tools/types";
 import type { AgentDefinition } from "../task/types";
 
 export type CapabilityCeiling = {
@@ -18,6 +19,12 @@ export type EmbeddedRuntimeOptions = {
 	readonly capabilityCeiling: CapabilityCeiling;
 	/** Explicit host-owned task-agent definitions. Missing means no agents. */
 	readonly agentDefinitions?: readonly AgentDefinition[];
+	/**
+	 * Host-owned custom tools carried down the in-process session tree so
+	 * TaskTool children inherit the parent's brokered capabilities. Always
+	 * filtered to the (derived) capability ceiling's hostToolNames.
+	 */
+	readonly hostTools?: readonly CustomTool[];
 	readonly mode: "deterministic";
 };
 
@@ -89,10 +96,13 @@ export function normalizeEmbeddedRuntime(runtime: EmbeddedRuntimeOptions): Embed
 				return Object.freeze(normalized);
 			}),
 	);
+	const allowedHostToolNames = new Set(capabilityCeiling.hostToolNames);
+	const hostTools = Object.freeze((runtime.hostTools ?? []).filter(tool => allowedHostToolNames.has(tool.name)));
 	return Object.freeze({
 		streamFn: runtime.streamFn,
 		capabilityCeiling,
 		agentDefinitions,
+		hostTools,
 		mode: "deterministic",
 	});
 }

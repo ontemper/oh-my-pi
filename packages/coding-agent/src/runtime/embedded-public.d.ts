@@ -19,6 +19,7 @@ export interface EmbeddedAgentDefinition {
 	readonly systemPrompt: string;
 	readonly tools?: readonly string[];
 	readonly spawns?: "*" | readonly string[];
+	readonly blocking?: boolean;
 	readonly model?: readonly string[];
 	readonly thinkingLevel?: string;
 	readonly output?: unknown;
@@ -31,6 +32,11 @@ export interface EmbeddedRuntimeOptions {
 	readonly streamFn: StreamFn;
 	readonly capabilityCeiling: CapabilityCeiling;
 	readonly agentDefinitions?: readonly EmbeddedAgentDefinition[];
+	/**
+	 * Host-owned custom tools carried down the in-process session tree so
+	 * TaskTool children inherit the parent's brokered capabilities.
+	 */
+	readonly hostTools?: readonly CustomTool[];
 }
 
 export interface SessionEntry {

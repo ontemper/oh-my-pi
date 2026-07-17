@@ -2316,7 +2316,16 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		const registeredTools = embeddedHostToolNames
 			? allRegisteredTools.filter(tool => embeddedHostToolNames.has(tool.definition.name))
 			: allRegisteredTools;
-		const unfilteredSdkCustomTools = options.customTools?.filter(tool => !isLegacyBuiltinToolDefinition(tool)) ?? [];
+		const explicitCustomTools = options.customTools ?? [];
+		// Embedded child sessions receive the parent's brokered host tools through
+		// the runtime (already ceiling-filtered by normalizeEmbeddedRuntime);
+		// explicitly passed tools win on name collisions.
+		const runtimeHostTools = (embeddedRuntime?.hostTools ?? []).filter(
+			tool => !explicitCustomTools.some(existing => existing.name === tool.name),
+		);
+		const unfilteredSdkCustomTools = [...explicitCustomTools, ...runtimeHostTools].filter(
+			tool => !isLegacyBuiltinToolDefinition(tool),
+		);
 		const sdkCustomTools = embeddedHostToolNames
 			? unfilteredSdkCustomTools.filter(tool => embeddedHostToolNames.has(tool.name))
 			: unfilteredSdkCustomTools;
