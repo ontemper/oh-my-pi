@@ -112,6 +112,10 @@
       "types": "./src/index.ts",
       "import": "./src/index.ts"
     },
+    "./embedded": {
+      "types": "./src/runtime/embedded-public.d.ts",
+      "import": "./src/index.ts"
+    },
     "./*": {
       "types": "./src/*.ts",
       "import": "./src/*.ts"
