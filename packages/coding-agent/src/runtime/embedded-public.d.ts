@@ -48,8 +48,9 @@ export interface CustomTool {
 	execute(
 		toolCallId: string,
 		input: unknown,
-		signal?: AbortSignal,
-		onUpdate?: (update: unknown) => void,
+		onUpdate: ((update: unknown) => void) | undefined,
+		context: unknown,
+		signal: AbortSignal,
 	): Promise<unknown>;
 }
 
@@ -84,10 +85,11 @@ export class SessionManager {
 export interface EmbeddedAgentSession {
 	readonly sessionManager: SessionManager;
 	subscribe(listener: (event: unknown) => void): () => void;
-	prompt(prompt: string): Promise<void>;
+	prompt(prompt: string, options?: { expandPromptTemplates?: boolean }): Promise<void>;
 	waitForIdle(): Promise<void>;
 	getLastAssistantMessage(): AssistantMessage | undefined;
-	dispose(): Promise<void>;
+	abort(options?: { goalReason?: string; reason?: string }): Promise<void>;
+	dispose(options?: { mnemopiConsolidateTimeoutMs?: number }): Promise<void>;
 }
 
 export interface CreateEmbeddedAgentSessionOptions {
@@ -105,6 +107,11 @@ export interface CreateEmbeddedAgentSessionOptions {
 	readonly disableExtensionDiscovery?: boolean;
 	readonly enableMCP?: boolean;
 	readonly enableLsp?: boolean;
+	readonly skipPythonPreflight?: boolean;
+	readonly skills?: readonly unknown[];
+	readonly rules?: readonly unknown[];
+	readonly contextFiles?: readonly unknown[];
+	readonly workspaceTree?: unknown;
 }
 
 export function createAgentSession(options: CreateEmbeddedAgentSessionOptions): Promise<{
