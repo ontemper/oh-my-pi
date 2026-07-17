@@ -1,12 +1,12 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { Settings } from "../config/settings";
-import { AgentLifecycleManager } from "../registry/agent-lifecycle";
-import { AgentRegistry } from "../registry/agent-registry";
-import { AgentRuntimeScope } from "../registry/agent-runtime-scope";
-import type { AgentSession } from "../session/agent-session";
-import type { ToolSession } from "../tools";
-import { type CoordinationDetails, HubTool } from "../tools/hub";
-import { finalizeSubagentLifecycle } from "./executor";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
+import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import { AgentRuntimeScope } from "@oh-my-pi/pi-coding-agent/registry/agent-runtime-scope";
+import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { finalizeSubagentLifecycle } from "@oh-my-pi/pi-coding-agent/task/executor";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { type CoordinationDetails, HubTool } from "@oh-my-pi/pi-coding-agent/tools/hub";
 
 function makeSession(): AgentSession {
 	return { dispose: async () => {} } as unknown as AgentSession;
