@@ -21,6 +21,7 @@ import type { MCPManager } from "../mcp";
 import type { MnemopiSessionState } from "../mnemopi/state";
 import type { PlanModeState } from "../plan-mode/state";
 import type { AgentRegistry } from "../registry/agent-registry";
+import type { EmbeddedRuntimeOptions } from "../runtime/embedded-runtime";
 import type { ArtifactManager } from "../session/artifacts";
 import type { ClientBridge } from "../session/client-bridge";
 import type { CustomMessage } from "../session/messages";
@@ -195,6 +196,8 @@ export interface ToolSession {
 	prewalkArmed?: boolean;
 	/** Task recursion depth (0 = top-level, 1 = first child, etc.) */
 	taskDepth?: number;
+	/** Immutable host-owned authority boundary for this deterministic embedded session. */
+	readonly embeddedRuntime?: EmbeddedRuntimeOptions;
 	/** Get shared eval executor session ID. Subagents inherit this to share JS/Python/Ruby/Julia state. */
 	getEvalSessionId?: () => string | null;
 	/** Get session file */
@@ -402,9 +405,17 @@ export type ToolName = BuiltinToolName;
  * Create tools from BUILTIN_TOOLS registry.
  */
 export async function createTools(session: ToolSession, toolNames?: string[]): Promise<Tool[]> {
+	const embeddedCeiling = session.embeddedRuntime?.capabilityCeiling;
+	const ceilingToolNames = embeddedCeiling ? new Set(embeddedCeiling.toolNames) : undefined;
 	const includeYield = session.requireYieldTool === true;
 	const enableLsp = session.enableLsp ?? true;
-	let requestedTools = toolNames && toolNames.length > 0 ? normalizeToolNames(toolNames) : undefined;
+	let requestedTools = embeddedCeiling
+		? toolNames && toolNames.length > 0
+			? normalizeToolNames(toolNames)
+			: []
+		: toolNames && toolNames.length > 0
+			? normalizeToolNames(toolNames)
+			: undefined;
 	const goalEnabled = session.settings.get("goal.enabled");
 	const goalModeActive = goalEnabled && session.getGoalModeState?.()?.enabled === true;
 	if (goalModeActive && requestedTools && !requestedTools.includes("goal")) {
@@ -504,6 +515,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	}
 	const allTools: Record<string, ToolFactory> = { ...BUILTIN_TOOLS, ...HIDDEN_TOOLS };
 	const isToolAllowed = (name: string) => {
+		if (ceilingToolNames && !ceilingToolNames.has(name)) return false;
 		if (name === "goal") return goalEnabled && goalModeActive;
 		if (name === "lsp") return enableLsp && session.settings.get("lsp.enabled");
 		if (name === "bash") return session.settings.get("bash.enabled");
@@ -533,11 +545,19 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 			);
 		}
 		if (name === "task") {
-			return canSpawnAtDepth(session.settings.get("task.maxRecursionDepth") ?? 2, session.taskDepth ?? 0);
+			const depth = session.taskDepth ?? 0;
+			if (
+				embeddedCeiling?.spawn === "deny" ||
+				(embeddedCeiling?.spawn &&
+					(depth >= embeddedCeiling.spawn.maxDepth || embeddedCeiling.spawn.agentNames.length === 0))
+			) {
+				return false;
+			}
+			return canSpawnAtDepth(session.settings.get("task.maxRecursionDepth") ?? 2, depth);
 		}
 		return true;
 	};
-	if (includeYield && requestedTools && !requestedTools.includes("yield")) {
+	if (includeYield && requestedTools && !requestedTools.includes("yield") && isToolAllowed("yield")) {
 		requestedTools.push("yield");
 	}
 
@@ -593,13 +613,17 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	// (e.g. ast_edit) also resolve through a `write` to xd://resolve/reject. Retain
 	// both whenever any device is mounted or a deferrable tool can stage one.
 	const xdevMounted = (session.xdevRegistry?.size ?? 0) > 0;
-	if ((tools.some(tool => tool.deferrable === true) || xdevMounted) && !tools.some(tool => tool.name === "write")) {
+	if (
+		(tools.some(tool => tool.deferrable === true) || xdevMounted) &&
+		!tools.some(tool => tool.name === "write") &&
+		isToolAllowed("write")
+	) {
 		const writeTool = await logger.time("createTools:write", BUILTIN_TOOLS.write, session);
 		if (writeTool) {
 			tools.push(wrapToolWithMetaNotice(writeTool));
 		}
 	}
-	if (xdevMounted && !tools.some(tool => tool.name === "read")) {
+	if (xdevMounted && !tools.some(tool => tool.name === "read") && isToolAllowed("read")) {
 		const readTool = await logger.time("createTools:read", BUILTIN_TOOLS.read, session);
 		if (readTool) {
 			tools.push(wrapToolWithMetaNotice(readTool));

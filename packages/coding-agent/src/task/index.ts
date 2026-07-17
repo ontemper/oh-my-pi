@@ -482,6 +482,15 @@ function discoverAgentsForCreate(cwd: string): Promise<DiscoveryResult> {
 	return pending;
 }
 
+function resolveEmbeddedAgents(session: ToolSession): AgentDefinition[] | undefined {
+	const runtime = session.embeddedRuntime;
+	if (!runtime || runtime.capabilityCeiling.spawn === "deny") {
+		return runtime ? [] : undefined;
+	}
+	const allowedAgentNames = new Set(runtime.capabilityCeiling.spawn.agentNames);
+	return (runtime.agentDefinitions ?? []).filter(agent => allowedAgentNames.has(agent.name));
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Tool Class
 // ═══════════════════════════════════════════════════════════════════════════
@@ -539,6 +548,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	// call frame stacked above the result frame. Mirrors `taskToolRenderer`.
 	readonly mergeCallAndResult = true;
 	readonly #discoveredAgents: AgentDefinition[];
+	readonly #embeddedAgents: AgentDefinition[] | undefined;
 	readonly #blockedAgent: string | undefined;
 	/**
 	 * One semaphore per TaskTool instance (i.e. per session): bounds concurrent
@@ -576,9 +586,11 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	private constructor(
 		private readonly session: ToolSession,
 		discoveredAgents: AgentDefinition[],
+		embeddedAgents: AgentDefinition[] | undefined,
 	) {
 		this.#blockedAgent = $env.PI_BLOCKED_AGENT;
 		this.#discoveredAgents = discoveredAgents;
+		this.#embeddedAgents = embeddedAgents;
 	}
 
 	#isBatchEnabled(): boolean {
@@ -603,8 +615,10 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	 * Create a TaskTool instance with async agent discovery.
 	 */
 	static async create(session: ToolSession): Promise<TaskTool> {
+		const embeddedAgents = resolveEmbeddedAgents(session);
+		if (embeddedAgents) return new TaskTool(session, embeddedAgents, embeddedAgents);
 		const { agents } = await discoverAgentsForCreate(session.cwd);
-		return new TaskTool(session, agents);
+		return new TaskTool(session, agents, undefined);
 	}
 
 	async execute(
@@ -1204,7 +1218,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		launchTiming?: { invokedAt: number; acquiredAt: number },
 	): Promise<AgentToolResult<TaskToolDetails>> {
 		const startTime = Date.now();
-		const { agents, projectAgentsDir } = await discoverAgents(this.session.cwd);
+		const { agents, projectAgentsDir } = this.#embeddedAgents
+			? { agents: this.#embeddedAgents, projectAgentsDir: null }
+			: await discoverAgents(this.session.cwd);
 		const agentName = params.agent ?? "";
 		const sharedContext = this.#isBatchEnabled() ? params.context?.trim() || undefined : undefined;
 		const assignment = (params.task ?? "").trim();
@@ -1449,6 +1465,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				authStorage: this.session.authStorage,
 				modelRegistry: this.session.modelRegistry,
 				settings: this.session.settings,
+				embeddedRuntime: this.session.embeddedRuntime,
 				mcpManager,
 				contextFiles,
 				skills: availableSkills,

@@ -289,6 +289,7 @@ import unexpectedStopRetryTemplate from "../prompts/system/unexpected-stop-retry
 import vibeModeActivePrompt from "../prompts/system/vibe-mode-active.md" with { type: "text" };
 import xdevMountNoticePrompt from "../prompts/system/xdev-mount-notice.md" with { type: "text" };
 import { AgentRegistry } from "../registry/agent-registry";
+import type { EmbeddedRuntimeOptions } from "../runtime/embedded-runtime";
 import {
 	deobfuscateAssistantContent,
 	deobfuscateSessionContext,
@@ -804,6 +805,8 @@ export interface AgentSessionConfig {
 	agent: Agent;
 	sessionManager: SessionManager;
 	settings: Settings;
+	/** Explicit host-owned runtime for deterministic embedded sessions. */
+	embeddedRuntime?: EmbeddedRuntimeOptions;
 	/** Whether the caller explicitly requested yolo/auto-approve behavior for this session. */
 	autoApprove?: boolean;
 	/** Models to cycle through with Ctrl+P (from --models flag) */
@@ -1747,6 +1750,7 @@ export class AgentSession {
 	readonly agent: Agent;
 	readonly sessionManager: SessionManager;
 	readonly settings: Settings;
+	readonly embeddedRuntime: EmbeddedRuntimeOptions | undefined;
 	/** Entries of tools mounted under `xd://`; empty when virtual devices are unmounted. */
 	getXdevToolEntries: () => Array<{ name: string; summary: string }>;
 	readonly yieldQueue: YieldQueue;
@@ -2513,6 +2517,7 @@ export class AgentSession {
 		this.agent = config.agent;
 		this.sessionManager = config.sessionManager;
 		this.settings = config.settings;
+		this.embeddedRuntime = config.embeddedRuntime;
 		this.#autoApprove = config.autoApprove === true;
 		// Power assertions are taken per turn (see #beginInFlight); nothing acquired here.
 		this.#evalKernelOwnerId = config.evalKernelOwnerId ?? `agent-session:${Snowflake.next()}`;
@@ -7790,6 +7795,7 @@ export class AgentSession {
 					activeModelString: formatModelString(model),
 					telemetryConfig: this.agent.telemetry,
 					sessionId: this.sessionId,
+					embeddedRuntime: this.embeddedRuntime,
 				},
 				signal,
 			);
@@ -8979,6 +8985,7 @@ export class AgentSession {
 	}
 
 	#scheduleReplanTitleRefresh(): void {
+		if (this.embeddedRuntime) return;
 		if (this.#replanTitleRefreshInFlight) return;
 		if (!this.settings.get("title.refreshOnReplan")) return;
 		if (this.sessionManager.titleSource === "user") return;
@@ -9673,6 +9680,7 @@ export class AgentSession {
 	 */
 	async #applyAutoThinkingLevel(promptText: string, generation: number): Promise<void> {
 		const model = this.model;
+		if (this.embeddedRuntime) return;
 		if (!model?.reasoning) return;
 		// Models with reasoning but no controllable effort surface (devin-agent
 		// Cascade routes effort via sibling model ids, not a wire param) have
@@ -11347,6 +11355,7 @@ export class AgentSession {
 		});
 	}
 	async #handleUnexpectedAssistantStop(assistantMessage: AssistantMessage): Promise<boolean> {
+		if (this.embeddedRuntime) return false;
 		if (!this.settings.get("features.unexpectedStopDetection")) {
 			return false;
 		}

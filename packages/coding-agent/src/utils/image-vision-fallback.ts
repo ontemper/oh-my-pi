@@ -27,6 +27,7 @@ import type { Settings } from "../config/settings";
 import { type LocalProtocolOptions, resolveLocalRoot } from "../internal-urls";
 import describeUserPrompt from "../prompts/tools/image-attachment-describe.md" with { type: "text" };
 import describeSystemPrompt from "../prompts/tools/image-attachment-describe-system.md" with { type: "text" };
+import type { EmbeddedRuntimeOptions } from "../runtime/embedded-runtime";
 
 /** Telemetry tag for the oneshot vision-description calls. */
 const ONESHOT_KIND = "image_attachment_describe";
@@ -53,6 +54,7 @@ export interface DescribeAttachedImagesDeps {
 	telemetryConfig?: AgentTelemetryConfig;
 	sessionId?: string;
 	/** Test seam: overrides the underlying completeSimple call. */
+	embeddedRuntime?: EmbeddedRuntimeOptions;
 	completeImpl?: typeof completeSimple;
 }
 
@@ -175,7 +177,7 @@ export async function describeAttachedImagesForTextModel(
 	signal?: AbortSignal,
 ): Promise<TextContent[]> {
 	const localRoot = resolveLocalRoot(deps.localProtocolOptions);
-	const visionModel = resolveVisionModel(deps);
+	const visionModel = deps.embeddedRuntime ? undefined : resolveVisionModel(deps);
 	const apiKey = visionModel ? await deps.modelRegistry.getApiKey(visionModel, deps.sessionId) : undefined;
 	const canDescribe = Boolean(visionModel && apiKey);
 	const telemetry = resolveTelemetry(deps.telemetryConfig, deps.sessionId);

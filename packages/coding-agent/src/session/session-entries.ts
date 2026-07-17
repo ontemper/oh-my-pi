@@ -1,5 +1,6 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, MessageAttribution, ServiceTierByFamily, TextContent } from "@oh-my-pi/pi-ai";
+import type { CapabilityCeiling } from "../runtime/embedded-runtime";
 
 export const CURRENT_SESSION_VERSION = 3;
 
@@ -155,9 +156,8 @@ export interface TtsrInjectionEntry extends SessionEntryBase {
 	injectedRules: string[];
 }
 
-/** Session init entry - captures initial context for subagent sessions (debugging/replay). */
-export interface SessionInitEntry extends SessionEntryBase {
-	type: "session_init";
+/** Serializable runtime contract captured for subagent replay and cold revival. */
+export interface SessionInitData {
 	/** Full system prompt sent to the model */
 	systemPrompt: string;
 	/** Initial task/user message */
@@ -170,6 +170,17 @@ export interface SessionInitEntry extends SessionEntryBase {
 	spawns?: string;
 	/** The agent's `readSummarize` setting (`false` = read summarization disabled); absent uses the session default. */
 	readSummarize?: boolean;
+	/** Absolute task depth used for conservative capability checks during cold revival. */
+	taskDepth?: number;
+	/** Exact model identity required to revive deterministic embedded sessions without discovery. */
+	model?: { readonly provider: string; readonly id: string };
+	/** Host authority snapshot used to reconstruct deterministic embedded sessions without widening. */
+	capabilityCeiling?: CapabilityCeiling;
+}
+
+/** Session init entry - captures initial context for subagent sessions (debugging/replay). */
+export interface SessionInitEntry extends SessionEntryBase, SessionInitData {
+	type: "session_init";
 }
 
 /** Mode change entry - tracks agent mode transitions (e.g. plan mode). */

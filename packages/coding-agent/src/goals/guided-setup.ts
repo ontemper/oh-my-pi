@@ -80,6 +80,9 @@ export async function runGuidedGoalTurn(
 	session: AgentSession,
 	options: GuidedGoalTurnOptions,
 ): Promise<GuidedGoalTurnResult> {
+	if (session.embeddedRuntime) {
+		throw new Error("/guided-goal is unavailable in deterministic embedded runtime.");
+	}
 	const plan = session.resolveRoleModelWithThinking("plan");
 	const slow = plan.model ? plan : session.resolveRoleModelWithThinking("slow");
 	const resolved = slow.model

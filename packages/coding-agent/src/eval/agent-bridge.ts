@@ -305,6 +305,14 @@ function buildSubagentFailureMessage(agentName: string, result: SingleResult): s
 	);
 }
 
+async function resolveAvailableAgents(session: ToolSession): Promise<AgentDefinition[]> {
+	const runtime = session.embeddedRuntime;
+	if (!runtime) return (await taskDiscovery.discoverAgents(session.cwd)).agents;
+	if (runtime.capabilityCeiling.spawn === "deny") return [];
+	const allowedAgentNames = new Set(runtime.capabilityCeiling.spawn.agentNames);
+	return (runtime.agentDefinitions ?? []).filter(agent => allowedAgentNames.has(agent.name));
+}
+
 /**
  * Run a single subagent on behalf of an eval cell's `agent()` call.
  */
@@ -324,7 +332,7 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 		);
 	}
 
-	const { agents } = await taskDiscovery.discoverAgents(options.session.cwd);
+	const agents = await resolveAvailableAgents(options.session);
 	const agent = taskDiscovery.getAgent(agents, agentName);
 	if (!agent) {
 		const available = agents.map(candidate => candidate.name).join(", ") || "none";
@@ -413,6 +421,7 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 		authStorage: options.session.authStorage,
 		modelRegistry: options.session.modelRegistry,
 		settings: options.session.settings,
+		embeddedRuntime: options.session.embeddedRuntime,
 		// Eval `agent()` subagents are never wall-clock capped: the parent
 		// cell's idle watchdog is suspended for the whole bridge call
 		// (withBridgeTimeoutPause), so a long-running phase/recovery workflow

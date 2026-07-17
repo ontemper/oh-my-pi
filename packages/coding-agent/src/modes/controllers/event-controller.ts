@@ -126,7 +126,7 @@ export class EventController {
 		// partial contexts (tests, minimal embeddings) by wiring null.
 		const session = ctx.session;
 		vocalizer.setEnhancer(
-			session?.modelRegistry && session.agent && session.settings
+			!session?.embeddedRuntime && session?.modelRegistry && session.agent && session.settings
 				? new SpeechEnhancer({
 						settings: session.settings,
 						registry: session.modelRegistry,

@@ -36,11 +36,18 @@ import subagentSystemPromptTemplate from "../prompts/system/subagent-system-prom
 import submitReminderTemplate from "../prompts/system/subagent-yield-reminder.md" with { type: "text" };
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { AgentRegistry } from "../registry/agent-registry";
+import {
+	type CapabilityCeiling,
+	type EmbeddedRuntimeOptions,
+	normalizeCapabilityCeiling,
+	normalizeEmbeddedRuntime,
+} from "../runtime/embedded-runtime";
 import { type CreateAgentSessionOptions, createAgentSession, discoverAuthStorage } from "../sdk";
 import type { AgentSession, AgentSessionEvent, Prewalk } from "../session/agent-session";
 import type { ArtifactManager } from "../session/artifacts";
 import type { AuthStorage } from "../session/auth-storage";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../session/messages";
+import type { SessionInitData } from "../session/session-entries";
 import { SessionManager } from "../session/session-manager";
 import { truncateTail } from "../session/streaming-output";
 import type { ConfiguredThinkingLevel } from "../thinking";
@@ -346,6 +353,8 @@ export interface ExecutorOptions {
 	authStorage?: AuthStorage;
 	modelRegistry?: ModelRegistry;
 	settings?: Settings;
+	/** Immutable authority captured from the spawning session. Never derived from Settings identity. */
+	readonly embeddedRuntime?: EmbeddedRuntimeOptions;
 	/**
 	 * Parent session's live per-family service tiers, the source of truth for a
 	 * subagent whose `tier.subagent` is `"inherit"`. `null` = the parent
@@ -760,6 +769,8 @@ interface RunMonitorArgs {
 	modelRegistry?: ModelRegistry;
 	/** Parent settings for tiny-model label generation. */
 	settings?: Settings;
+	/** Session-owned deterministic runtime; embedded runs skip ambient task-label generation. */
+	readonly embeddedRuntime?: EmbeddedRuntimeOptions;
 	modelOverride?: string | string[];
 	signal?: AbortSignal;
 	onProgress?: (progress: AgentProgress) => void;
@@ -1051,7 +1062,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	// a late label still lands via the finalize-time reads of `progress.description`;
 	// failures just leave the label unset.
 	const labelSource = assignment?.trim();
-	if (!args.description && args.modelRegistry && args.settings && labelSource) {
+	if (!args.embeddedRuntime && !args.description && args.modelRegistry && args.settings && labelSource) {
 		generateTaskLabel(labelSource, args.modelRegistry, args.settings, id)
 			.then(label => {
 				if (!label || abortSignal.aborted || progress.description) return;
@@ -2028,6 +2039,64 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 		startTime,
 	});
 }
+function createCapabilityDeniedResult(options: ExecutorOptions, reason: string): SingleResult {
+	return {
+		index: options.index,
+		id: options.id,
+		agent: options.agent.name,
+		agentSource: options.agent.source,
+		task: options.task,
+		assignment: options.assignment,
+		description: options.description,
+		exitCode: 1,
+		output: "",
+		stderr: reason,
+		truncated: false,
+		durationMs: 0,
+		tokens: 0,
+		requests: 0,
+		modelOverride: options.modelOverride,
+		error: reason,
+	};
+}
+
+function deriveChildCapabilityCeiling(
+	parent: CapabilityCeiling,
+	toolNames: readonly string[] | undefined,
+	agentSpawns: AgentDefinition["spawns"],
+	childDepth: number,
+): CapabilityCeiling {
+	const effectiveToolNames = new Set(toolNames ?? []);
+	if (parent.toolNames.includes("yield")) effectiveToolNames.add("yield");
+	const spawn = parent.spawn;
+	let childSpawn: CapabilityCeiling["spawn"] = "deny";
+	if (spawn !== "deny" && childDepth < spawn.maxDepth && agentSpawns !== undefined) {
+		const declaredAgents = agentSpawns === "*" ? undefined : new Set(agentSpawns);
+		childSpawn = {
+			agentNames: declaredAgents ? spawn.agentNames.filter(name => declaredAgents.has(name)) : spawn.agentNames,
+			maxDepth: spawn.maxDepth,
+			detached: spawn.detached,
+		};
+	}
+	return normalizeCapabilityCeiling({
+		toolNames: parent.toolNames.filter(name => effectiveToolNames.has(name)),
+		hostToolNames: parent.hostToolNames,
+		spawn: childSpawn,
+	});
+}
+
+function createChildEmbeddedRuntime(
+	parent: EmbeddedRuntimeOptions | undefined,
+	toolNames: readonly string[] | undefined,
+	agentSpawns: AgentDefinition["spawns"],
+	childDepth: number,
+): EmbeddedRuntimeOptions | undefined {
+	if (!parent) return undefined;
+	return normalizeEmbeddedRuntime({
+		...parent,
+		capabilityCeiling: deriveChildCapabilityCeiling(parent.capabilityCeiling, toolNames, agentSpawns, childDepth),
+	});
+}
 
 /**
  * Run a single agent in-process.
@@ -2077,13 +2146,30 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		};
 	}
 
+	const settings = options.settings ?? Settings.isolated();
+	const embeddedRuntime = options.embeddedRuntime ? normalizeEmbeddedRuntime(options.embeddedRuntime) : undefined;
+	const parentDepth = options.taskDepth ?? 0;
+	if (embeddedRuntime) {
+		const spawn = embeddedRuntime.capabilityCeiling.spawn;
+		const denial =
+			spawn === "deny"
+				? "Embedded runtime denies subagent spawning"
+				: parentDepth >= spawn.maxDepth
+					? `Embedded runtime maximum spawn depth ${spawn.maxDepth} reached`
+					: !spawn.agentNames.includes(agent.name)
+						? `Embedded runtime does not allow agent "${agent.name}"`
+						: options.detached === true && !spawn.detached
+							? "Embedded runtime denies detached subagent spawning"
+							: undefined;
+		if (denial) return createCapabilityDeniedResult(options, denial);
+	}
+
 	// Set up artifact paths and write input file upfront if artifacts dir provided
 	let subtaskSessionFile: string | undefined;
 	if (options.artifactsDir) {
 		subtaskSessionFile = path.join(options.artifactsDir, `${id}.jsonl`);
 	}
 
-	const settings = options.settings ?? Settings.isolated();
 	const subagentSettings = createSubagentSettings(
 		settings,
 		agent.readSummarize === false ? { "read.summarize.enabled": false } : undefined,
@@ -2104,7 +2190,6 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	const softRequestBudget =
 		configuredDefaultBudget === 0 ? 0 : (SOFT_REQUEST_BUDGET[agent.name] ?? configuredDefaultBudget);
 	const softRequestBudgetNotice = settings.get("task.softRequestBudgetNotice") ?? false;
-	const parentDepth = options.taskDepth ?? 0;
 	const childDepth = parentDepth + 1;
 	const atMaxDepth = maxRecursionDepth >= 0 && childDepth >= maxRecursionDepth;
 
@@ -2121,9 +2206,13 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	if (atMaxDepth && toolNames?.includes("task")) {
 		toolNames = toolNames.filter(name => name !== "task");
 	}
-	// The hub is always available; the COOP prompt section advertises messaging,
-	// so a restricted whitelist must still carry `hub` for the subagent to use it.
-	if (toolNames && !toolNames.includes("hub")) {
+	// The hub remains default-on for CLI sessions. Embedded sessions may only
+	// receive it when the host ceiling explicitly grants it.
+	if (
+		toolNames &&
+		!toolNames.includes("hub") &&
+		(!embeddedRuntime || embeddedRuntime.capabilityCeiling.toolNames.includes("hub"))
+	) {
 		toolNames = [...toolNames, "hub"];
 	}
 	if (toolNames?.includes("exec")) {
@@ -2133,19 +2222,30 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		expanded.push("bash");
 		toolNames = Array.from(new Set(expanded));
 	}
+	if (embeddedRuntime && toolNames) {
+		const allowed = new Set(embeddedRuntime.capabilityCeiling.toolNames);
+		toolNames = toolNames.filter(name => allowed.has(name));
+	}
+	const childEmbeddedRuntime = createChildEmbeddedRuntime(embeddedRuntime, toolNames, agent.spawns, childDepth);
 
 	const modelPatterns = normalizeModelPatterns(modelOverride ?? agent.model);
 	const sessionFile = subtaskSessionFile ?? null;
-	const spawnsEnv = atMaxDepth
-		? ""
-		: agent.spawns === undefined
+	const spawnsEnv = childEmbeddedRuntime
+		? childEmbeddedRuntime.capabilityCeiling.spawn === "deny"
 			? ""
-			: agent.spawns === "*"
-				? "*"
-				: agent.spawns.join(",");
+			: childEmbeddedRuntime.capabilityCeiling.spawn.agentNames.join(",")
+		: atMaxDepth
+			? ""
+			: agent.spawns === undefined
+				? ""
+				: agent.spawns === "*"
+					? "*"
+					: agent.spawns.join(",");
 
 	const lspEnabled = enableLsp ?? true;
-	const ircEnabled = isIrcEnabled(subagentSettings, childDepth);
+	const ircEnabled =
+		(!childEmbeddedRuntime || childEmbeddedRuntime.capabilityCeiling.toolNames.includes("hub")) &&
+		isIrcEnabled(subagentSettings, childDepth);
 	const skipPythonPreflight = Array.isArray(toolNames) && !toolNames.includes("eval");
 
 	const monitor = createSubagentRunMonitor({
@@ -2157,6 +2257,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		description: options.description,
 		modelRegistry: options.modelRegistry,
 		settings,
+		embeddedRuntime,
 		modelOverride,
 		signal,
 		onProgress,
@@ -2232,6 +2333,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		try {
 			checkAbort();
 			// Pin authStorage to modelRegistry.authStorage — mirrors the createAgentSession invariant.
+			if (embeddedRuntime && !options.modelRegistry) {
+				throw new Error("Embedded subagent execution requires the caller-provided model registry");
+			}
 			const registryFromParent = options.modelRegistry !== undefined;
 			const modelRegistry =
 				options.modelRegistry ??
@@ -2354,8 +2458,13 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			}
 			sessionOpenedAt = performance.now();
 
-			const mcpProxyTools = options.mcpManager ? createMCPProxyTools(options.mcpManager) : [];
-			const enableMCP = !options.mcpManager;
+			const hostToolNames = childEmbeddedRuntime
+				? new Set(childEmbeddedRuntime.capabilityCeiling.hostToolNames)
+				: undefined;
+			const mcpProxyTools = options.mcpManager
+				? createMCPProxyTools(options.mcpManager).filter(tool => !hostToolNames || hostToolNames.has(tool.name))
+				: [];
+			const enableMCP = childEmbeddedRuntime ? false : !options.mcpManager;
 
 			// Derive subagent-scoped telemetry from the parent's config so the
 			// child loop's spans nest under the parent's active execute_tool span
@@ -2392,6 +2501,17 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			}
 
 			const { normalized: normalizedOutputSchema } = normalizeSchema(outputSchema);
+			const subagentPrompt = prompt.render(subagentSystemPromptTemplate, {
+				agent: agent.systemPrompt,
+				context: options.context?.trim() ?? "",
+				planReference: options.planReference?.content ?? "",
+				planReferencePath: options.planReference?.path ?? "",
+				worktree: worktree ?? "",
+				outputSchema: normalizedOutputSchema,
+				outputSchemaOverridesAgent: options.outputSchemaOverridesAgent === true,
+				ircPeers: ircEnabled ? renderIrcPeerRoster(id) : "",
+				ircSelfId: ircEnabled ? id : "",
+			});
 
 			// Captured by the lifecycle reviver: rebuilding an equivalent session from
 			// the same JSONL file re-invokes createAgentSession with the exact options
@@ -2410,6 +2530,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					model || modelOverride === undefined ? undefined : `${SUBAGENT_RETRY_FALLBACK_ROLE_PREFIX}${id}`,
 				thinkingLevel: effectiveThinkingLevel,
 				toolNames,
+				embeddedRuntime: childEmbeddedRuntime,
 				outputSchema,
 				requireYieldTool: true,
 				contextFiles: options.contextFiles,
@@ -2417,24 +2538,14 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				promptTemplates: options.promptTemplates,
 				workspaceTree: options.workspaceTree,
 				rules: options.rules,
-				preloadedExtensionPaths: options.preloadedExtensionPaths,
-				preloadedCustomToolPaths: options.preloadedCustomToolPaths,
-				systemPrompt: defaultPrompt => {
-					const subagentPrompt = prompt.render(subagentSystemPromptTemplate, {
-						agent: agent.systemPrompt,
-						context: options.context?.trim() ?? "",
-						planReference: options.planReference?.content ?? "",
-						planReferencePath: options.planReference?.path ?? "",
-						worktree: worktree ?? "",
-						outputSchema: normalizedOutputSchema,
-						outputSchemaOverridesAgent: options.outputSchemaOverridesAgent === true,
-						ircPeers: ircEnabled ? renderIrcPeerRoster(id) : "",
-						ircSelfId: ircEnabled ? id : "",
-					});
-					return defaultPrompt.length === 0
-						? [subagentPrompt]
-						: [...defaultPrompt.slice(0, -1), subagentPrompt, defaultPrompt[defaultPrompt.length - 1]];
-				},
+				preloadedExtensionPaths: childEmbeddedRuntime ? undefined : options.preloadedExtensionPaths,
+				preloadedCustomToolPaths: childEmbeddedRuntime ? undefined : options.preloadedCustomToolPaths,
+				systemPrompt: childEmbeddedRuntime
+					? [subagentPrompt]
+					: defaultPrompt =>
+							defaultPrompt.length === 0
+								? [subagentPrompt]
+								: [...defaultPrompt.slice(0, -1), subagentPrompt, defaultPrompt[defaultPrompt.length - 1]],
 				sessionManager: sessionManagerForRun,
 				hasUI: false,
 				prewalk,
@@ -2446,10 +2557,10 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				parentAgentId: options.parentAgentId,
 				agentId: id,
 				agentDisplayName: agent.name,
-				enableLsp: lspEnabled,
+				enableLsp: childEmbeddedRuntime ? false : lspEnabled,
 				skipPythonPreflight,
 				enableMCP,
-				mcpManager: options.mcpManager,
+				mcpManager: childEmbeddedRuntime ? undefined : options.mcpManager,
 				customTools: mcpProxyTools.length > 0 ? mcpProxyTools : undefined,
 				localProtocolOptions: options.localProtocolOptions,
 				telemetry: subagentTelemetry,
@@ -2517,14 +2628,18 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				await awaitAbortable(session.setActiveToolsByName(filteredSubagentTools));
 			}
 
-			session.sessionManager.appendSessionInit({
+			const persistedInit: SessionInitData = {
 				systemPrompt: session.agent.state.systemPrompt.join("\n\n"),
 				task,
 				tools: session.getActiveToolNames(),
 				spawns: spawnsEnv,
 				readSummarize: agent.readSummarize,
+				taskDepth: childDepth,
 				outputSchema,
-			});
+				model: model ? { provider: model.provider, id: model.id } : undefined,
+				capabilityCeiling: childEmbeddedRuntime?.capabilityCeiling,
+			};
+			session.sessionManager.appendSessionInit(persistedInit);
 
 			abortSignal.addEventListener(
 				"abort",

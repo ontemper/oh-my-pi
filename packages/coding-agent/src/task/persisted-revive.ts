@@ -5,6 +5,12 @@ import type { Settings } from "../config/settings";
 import { MCPManager } from "../mcp/manager";
 import type { PersistedSubagentReviverFactory } from "../registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import {
+	type CapabilityCeiling,
+	type EmbeddedRuntimeOptions,
+	normalizeCapabilityCeiling,
+	normalizeEmbeddedRuntime,
+} from "../runtime/embedded-runtime";
 import { createAgentSession } from "../sdk";
 import type { AgentSession } from "../session/agent-session";
 import type { AuthStorage } from "../session/auth-storage";
@@ -22,6 +28,8 @@ export interface PersistedSubagentReviveContext {
 	authStorage: AuthStorage;
 	modelRegistry: ModelRegistry;
 	settings: Settings;
+	/** Immutable authority captured from the owning top-level session. */
+	readonly embeddedRuntime?: EmbeddedRuntimeOptions;
 	/** LSP policy of the top-level session; revived subagents inherit it rather than defaulting on. */
 	enableLsp: boolean;
 }
@@ -42,9 +50,49 @@ export interface PersistedSubagentReviveContext {
  * executor's subagent wiring (MCP proxy tools, depth-derived gating,
  * yield-required, active-tool clamp, registry status sync).
  */
+function intersectCapabilityCeilings(current: CapabilityCeiling, persisted: CapabilityCeiling): CapabilityCeiling {
+	const currentTools = new Set(current.toolNames);
+	const currentHostTools = new Set(current.hostToolNames);
+	const currentSpawn = current.spawn;
+	const persistedSpawn = persisted.spawn;
+	const spawn: CapabilityCeiling["spawn"] =
+		currentSpawn === "deny" || persistedSpawn === "deny"
+			? "deny"
+			: {
+					agentNames: persistedSpawn.agentNames.filter(name => currentSpawn.agentNames.includes(name)),
+					maxDepth: Math.min(currentSpawn.maxDepth, persistedSpawn.maxDepth),
+					detached: currentSpawn.detached && persistedSpawn.detached,
+				};
+	return normalizeCapabilityCeiling({
+		toolNames: persisted.toolNames.filter(name => currentTools.has(name)),
+		hostToolNames: persisted.hostToolNames.filter(name => currentHostTools.has(name)),
+		spawn,
+	});
+}
+
+function resolveRevivedEmbeddedRuntime(
+	current: EmbeddedRuntimeOptions | undefined,
+	persisted: CapabilityCeiling | undefined,
+): EmbeddedRuntimeOptions | undefined {
+	if (!current) {
+		if (persisted) throw new Error("Cannot revive an embedded session without its host runtime");
+		return undefined;
+	}
+	const persistedOrDeny: CapabilityCeiling = persisted ?? {
+		toolNames: [],
+		hostToolNames: [],
+		spawn: "deny",
+	};
+	return normalizeEmbeddedRuntime({
+		...current,
+		capabilityCeiling: intersectCapabilityCeilings(current.capabilityCeiling, persistedOrDeny),
+	});
+}
+
 export function createPersistedSubagentReviverFactory(
 	ctx: PersistedSubagentReviveContext,
 ): PersistedSubagentReviverFactory {
+	const embeddedRuntime = ctx.embeddedRuntime ? normalizeEmbeddedRuntime(ctx.embeddedRuntime) : undefined;
 	const registry = AgentRegistry.global();
 	return async ref => {
 		const sessionFile = ref.sessionFile;
@@ -63,15 +111,28 @@ export function createPersistedSubagentReviverFactory(
 		// taskDepth drives real capability gating (task-spawn allowance, memory
 		// startup, …); derive it from the persisted parent chain rather than
 		// assuming a fixed level.
-		let taskDepth = 1;
+		let registryDepth = 1;
 		let parentId = ref.parentId;
 		const seen = new Set<string>();
 		while (parentId && parentId !== MAIN_AGENT_ID && !seen.has(parentId)) {
 			seen.add(parentId);
-			taskDepth++;
+			registryDepth++;
 			parentId = registry.get(parentId)?.parentId;
 		}
+		const persistedDepth =
+			init.taskDepth !== undefined && Number.isInteger(init.taskDepth) && init.taskDepth >= 0
+				? init.taskDepth
+				: registryDepth;
+		const taskDepth = Math.max(registryDepth, persistedDepth);
+		const currentEmbeddedRuntime = embeddedRuntime;
+		if (init.capabilityCeiling && !currentEmbeddedRuntime) return undefined;
+		const revivedModel = init.model ? ctx.modelRegistry.find(init.model.provider, init.model.id) : undefined;
+		if (currentEmbeddedRuntime && !revivedModel) return undefined;
 		return async () => {
+			const revivedEmbeddedRuntime = resolveRevivedEmbeddedRuntime(currentEmbeddedRuntime, init.capabilityCeiling);
+			if (revivedEmbeddedRuntime && !revivedModel) {
+				throw new Error("Cannot revive an embedded session without its persisted model");
+			}
 			// Re-open fresh on every revive: park closes the writer, so this takes
 			// the single-writer lock cleanly and restores the full message history.
 			const reopened = await SessionManager.open(sessionFile, undefined, undefined, {
@@ -82,7 +143,12 @@ export function createPersistedSubagentReviverFactory(
 			// Reuse the parent's live MCP connections via proxy tools (no
 			// re-discovery), exactly as the executor does for live subagents.
 			const mcpManager = MCPManager.instance();
-			const mcpProxyTools = mcpManager ? createMCPProxyTools(mcpManager) : [];
+			const allowedHostTools = revivedEmbeddedRuntime
+				? new Set(revivedEmbeddedRuntime.capabilityCeiling.hostToolNames)
+				: undefined;
+			const mcpProxyTools = mcpManager
+				? createMCPProxyTools(mcpManager).filter(tool => !allowedHostTools || allowedHostTools.has(tool.name))
+				: [];
 			const { session } = await createAgentSession({
 				cwd: ctx.session.sessionManager.getCwd(),
 				authStorage: ctx.authStorage,
@@ -91,29 +157,37 @@ export function createPersistedSubagentReviverFactory(
 					ctx.settings,
 					init.readSummarize === false ? { "read.summarize.enabled": false } : undefined,
 				),
+				model: revivedEmbeddedRuntime ? revivedModel : undefined,
 				sessionManager: reopened,
 				agentId: ref.id,
 				agentDisplayName: ref.displayName,
 				parentTaskPrefix: ref.id,
 				parentAgentId: ref.parentId,
 				taskDepth,
+				embeddedRuntime: revivedEmbeddedRuntime,
 				toolNames: init.tools,
 				outputSchema: init.outputSchema,
 				requireYieldTool: true,
-				systemPrompt: () => [init.systemPrompt],
+				systemPrompt: revivedEmbeddedRuntime ? [init.systemPrompt] : () => [init.systemPrompt],
 				// Old files predate persisted spawns: deny re-spawning rather than let
 				// createAgentSession default to wildcard ("*").
 				spawns: init.spawns ?? "",
 				hasUI: false,
-				enableLsp: ctx.enableLsp,
-				enableMCP: !mcpManager,
-				mcpManager,
+				enableLsp: revivedEmbeddedRuntime ? false : ctx.enableLsp,
+				enableMCP: revivedEmbeddedRuntime ? false : !mcpManager,
+				mcpManager: revivedEmbeddedRuntime ? undefined : mcpManager,
 				customTools: mcpProxyTools.length > 0 ? mcpProxyTools : undefined,
 			});
-			// Clamp the active set to the persisted list: createAgentSession's
-			// `alwaysInclude` can re-add non-defaultInactive extension/custom tools
-			// the original run didn't carry. Unknown/missing names are ignored.
-			await session.setActiveToolsByName([...init.tools, ...session.getMountedXdevToolNames()]);
+			// Clamp the active set to both the persisted list and the immutable
+			// embedded ceiling. Unknown/missing names are ignored.
+			const allowedTools = revivedEmbeddedRuntime
+				? new Set(revivedEmbeddedRuntime.capabilityCeiling.toolNames)
+				: undefined;
+			await session.setActiveToolsByName(
+				[...init.tools, ...session.getMountedXdevToolNames()].filter(
+					name => !allowedTools || allowedTools.has(name),
+				),
+			);
 			// Cold revives must drive registry status themselves — createAgentSession
 			// doesn't wire this generically (the live path does it in the executor).
 			// Without it the idle-TTL timer never clears on a turn and the lifecycle

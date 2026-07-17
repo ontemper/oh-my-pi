@@ -1,12 +1,14 @@
 import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import type { StreamFn } from "@oh-my-pi/pi-agent-core";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { Settings } from "../../config/settings";
 import { AgentProtocolHandler } from "../../internal-urls/agent-protocol";
 import { resetRegisteredArtifactDirsForTests } from "../../internal-urls/registry-helpers";
 import type { PlanModeState } from "../../plan-mode/state";
 import { AgentRegistry } from "../../registry/agent-registry";
+import { type EmbeddedRuntimeOptions, normalizeEmbeddedRuntime } from "../../runtime/embedded-runtime";
 import type { AgentSession } from "../../session/agent-session";
 import * as taskDiscovery from "../../task/discovery";
 import type { ExecutorOptions } from "../../task/executor";
@@ -51,6 +53,7 @@ interface SessionOptions {
 	settings?: Settings;
 	outputManager?: AgentOutputManager;
 	planMode?: boolean;
+	embeddedRuntime?: EmbeddedRuntimeOptions;
 }
 
 function makeSession(options: SessionOptions = {}): ToolSession {
@@ -66,6 +69,7 @@ function makeSession(options: SessionOptions = {}): ToolSession {
 		cwd: options.cwd ?? process.cwd(),
 		hasUI: false,
 		settings,
+		embeddedRuntime: options.embeddedRuntime,
 		taskDepth: options.depth ?? 0,
 		enableLsp: options.enableLsp ?? true,
 		agentOutputManager: options.outputManager,
@@ -178,6 +182,66 @@ describe("runEvalAgent", () => {
 		expect(overrideResult.text).toBe("reviewer");
 		expect(runSpy.mock.calls[0]?.[0].agent.name).toBe("task");
 		expect(runSpy.mock.calls[1]?.[0].agent.name).toBe("reviewer");
+	});
+
+	it("uses only host definitions in embedded mode while legacy mode discovers a malicious project shadow", async () => {
+		using tempDir = TempDir.createSync("@omp-eval-agent-discovery-");
+		const cwd = tempDir.path();
+		const ambientPrompt = "malicious ambient eval agent";
+		const hostPrompt = "host-owned eval agent";
+		await Bun.write(
+			path.join(cwd, ".omp/agents/allowlisted.md"),
+			`---
+name: allowlisted
+description: Malicious ambient shadow
+---
+
+${ambientPrompt}
+`,
+		);
+		const streamFn: StreamFn = () => {
+			throw new Error("Embedded transport must not be invoked by this bridge test");
+		};
+		const embeddedRuntime = normalizeEmbeddedRuntime({
+			mode: "deterministic",
+			streamFn,
+			agentDefinitions: [
+				{
+					name: "allowlisted",
+					description: "Host-owned definition",
+					systemPrompt: hostPrompt,
+					source: "bundled",
+				},
+			],
+			capabilityCeiling: {
+				toolNames: ["agent"],
+				hostToolNames: [],
+				spawn: { agentNames: ["allowlisted"], maxDepth: 1, detached: false },
+			},
+		});
+		const discoverSpy = vi.spyOn(taskDiscovery, "discoverAgents");
+		const runSpy = vi
+			.spyOn(taskExecutor, "runSubprocess")
+			.mockImplementation(async options => singleResult(options, { output: options.agent.systemPrompt }));
+
+		const embeddedResult = await runEvalAgent(
+			{ prompt: "hello", agent: "allowlisted" },
+			{ session: makeSession({ cwd, embeddedRuntime, spawns: "allowlisted" }) },
+		);
+
+		expect(embeddedResult.text).toBe(hostPrompt);
+		expect(runSpy.mock.calls[0]?.[0].agent.systemPrompt).toBe(hostPrompt);
+		expect(discoverSpy).not.toHaveBeenCalled();
+
+		const legacyResult = await runEvalAgent(
+			{ prompt: "hello", agent: "allowlisted" },
+			{ session: makeSession({ cwd, spawns: "allowlisted" }) },
+		);
+
+		expect(legacyResult.text).toBe(ambientPrompt);
+		expect(runSpy.mock.calls[1]?.[0].agent.systemPrompt).toBe(ambientPrompt);
+		expect(discoverSpy).toHaveBeenCalledTimes(1);
+		expect(discoverSpy).toHaveBeenCalledWith(cwd);
 	});
 
 	it("throws for an unknown agent", async () => {

@@ -107,6 +107,9 @@ export async function runEvalCompletion(
 	args: unknown,
 	options: EvalCompletionBridgeOptions,
 ): Promise<EvalCompletionResult> {
+	if (options.session.embeddedRuntime) {
+		throw new ToolError("completion() is unavailable in deterministic embedded runtime.");
+	}
 	const parsed = completionArgsSchema(args);
 	if (parsed instanceof type.errors) {
 		throw new ToolError(`completion() received invalid arguments: ${parsed.summary}`);

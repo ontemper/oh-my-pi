@@ -45,6 +45,7 @@ import {
 	type ServiceTierChangeEntry,
 	type SessionEntry,
 	type SessionHeader,
+	type SessionInitData,
 	type SessionInitEntry,
 	type SessionMessageEntry,
 	type SessionTitleSource,
@@ -1505,14 +1506,7 @@ export class SessionManager {
 		return entry.id;
 	}
 
-	appendSessionInit(init: {
-		systemPrompt: string;
-		task: string;
-		tools: string[];
-		outputSchema?: unknown;
-		spawns?: string;
-		readSummarize?: boolean;
-	}): string {
+	appendSessionInit(init: SessionInitData): string {
 		const entry: SessionInitEntry = { type: "session_init", ...this.#freshEntryFields(), ...init };
 		this.#recordEntry(entry);
 		return entry.id;
@@ -1943,14 +1937,7 @@ export class SessionManager {
 		storage: SessionStorage = new FileSessionStorage(),
 	): Promise<{
 		cwd: string;
-		init: {
-			systemPrompt: string;
-			task: string;
-			tools: string[];
-			outputSchema?: unknown;
-			spawns?: string;
-			readSummarize?: boolean;
-		} | null;
+		init: SessionInitData | null;
 	} | null> {
 		let loaded: FileEntry[];
 		try {
@@ -1961,14 +1948,7 @@ export class SessionManager {
 		// A missing/empty file has no usable session — nothing to revive from.
 		if (loaded.length === 0) return null;
 		const header = loaded.find(entry => entry.type === "session") as SessionHeader | undefined;
-		let init: {
-			systemPrompt: string;
-			task: string;
-			tools: string[];
-			outputSchema?: unknown;
-			spawns?: string;
-			readSummarize?: boolean;
-		} | null = null;
+		let init: SessionInitData | null = null;
 		for (let index = loaded.length - 1; index >= 0; index--) {
 			const entry = loaded[index];
 			if (entry.type === "session_init") {
@@ -1978,7 +1958,10 @@ export class SessionManager {
 					tools: entry.tools,
 					outputSchema: entry.outputSchema,
 					readSummarize: entry.readSummarize,
+					taskDepth: entry.taskDepth,
 					spawns: entry.spawns,
+					model: entry.model,
+					capabilityCeiling: entry.capabilityCeiling,
 				};
 				break;
 			}

@@ -77,7 +77,7 @@ export type BuildCommitMessage = () => undefined | ((diff: string) => Promise<st
 export function makeIsolationCommitMessage(session: ToolSession): BuildCommitMessage {
 	return () => {
 		const style = session.settings.get("task.isolation.commits");
-		if (style !== "ai" || !session.modelRegistry) return undefined;
+		if (style !== "ai" || !session.modelRegistry || session.embeddedRuntime) return undefined;
 		const registry = session.modelRegistry;
 		const settings = session.settings;
 		const sessionId = session.getSessionId?.() ?? undefined;
