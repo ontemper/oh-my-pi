@@ -112,6 +112,9 @@ export interface CreateEmbeddedAgentSessionOptions {
 	readonly rules?: readonly unknown[];
 	readonly contextFiles?: readonly unknown[];
 	readonly workspaceTree?: unknown;
+	readonly promptTemplates?: readonly unknown[];
+	readonly slashCommands?: readonly unknown[];
+	readonly hasUI?: boolean;
 }
 
 export function createAgentSession(options: CreateEmbeddedAgentSessionOptions): Promise<{
