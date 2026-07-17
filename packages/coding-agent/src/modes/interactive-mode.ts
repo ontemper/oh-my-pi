@@ -1597,7 +1597,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	/** Refresh the running-subagents status badge from the active local or collab registry. */
 	syncRunningSubagentBadge(options: { requestRender?: boolean } = {}): void {
-		const registry = getRunningSubagentBadgeRegistry(this.collabGuest);
+		const registry = getRunningSubagentBadgeRegistry(this.collabGuest, this.session.agentRuntimeScope.registry);
 		if (this.#agentRegistrySubscriptionTarget !== registry) {
 			this.#agentRegistryUnsubscribe?.();
 			this.#agentRegistrySubscriptionTarget = registry;

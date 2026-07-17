@@ -98,8 +98,8 @@ import { createSessionMemoryRuntimeContext, resolveMemoryBackend } from "./memor
 import type { MnemopiSessionState } from "./mnemopi/state";
 import asyncResultTemplate from "./prompts/tools/async-result.md" with { type: "text" };
 import lateDiagnosticTemplate from "./prompts/tools/lsp-late-diagnostic.md" with { type: "text" };
-import { AgentLifecycleManager } from "./registry/agent-lifecycle";
-import { AgentRegistry, MAIN_AGENT_ID } from "./registry/agent-registry";
+import { MAIN_AGENT_ID } from "./registry/agent-registry";
+import { AgentRuntimeScope } from "./registry/agent-runtime-scope";
 import {
 	collectEnvSecrets,
 	deobfuscateSessionContext,
@@ -499,10 +499,8 @@ export interface CreateAgentSessionOptions {
 	agentId?: string;
 	/** Display name for the agent in IRC. Default: "main" or "sub". */
 	agentDisplayName?: string;
-	/** Optional shared agent registry for IRC routing. Default: AgentRegistry.global(). */
-	agentRegistry?: AgentRegistry;
-	/** Optional lifecycle manager for park/revive of kept-alive subagents; must be built on the same registry as `agentRegistry`. Default: AgentLifecycleManager.global(). */
-	agentLifecycleManager?: AgentLifecycleManager;
+	/** Task-agent identity, lifecycle, and IRC scope. Default: process-global CLI compatibility scope. */
+	agentRuntimeScope?: AgentRuntimeScope;
 	/** Parent task ID prefix for nested artifact naming (e.g., "Extensions") */
 	parentTaskPrefix?: string;
 	/**
@@ -1509,8 +1507,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 	const scopedAsyncJobManager = asyncJobManager ?? (options.parentTaskPrefix ? AsyncJobManager.instance() : undefined);
 
-	const agentRegistry = options.agentRegistry ?? AgentRegistry.global();
-	const agentLifecycleManager = options.agentLifecycleManager ?? AgentLifecycleManager.global();
+	const agentRuntimeScope = options.agentRuntimeScope ?? AgentRuntimeScope.global();
+	const { registry: agentRegistry, lifecycle: agentLifecycleManager } = agentRuntimeScope;
 	const resolvedAgentId = options.agentId ?? options.parentTaskPrefix ?? MAIN_AGENT_ID;
 	const resolvedAgentDisplayName =
 		options.agentDisplayName ?? ((options.taskDepth ?? 0) > 0 || options.parentTaskPrefix ? "sub" : "main");
@@ -1582,8 +1580,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			getMnemopiSessionState: () => session?.getMnemopiSessionState(),
 			getAgentId: () => resolvedAgentId,
 			getToolByName: name => session?.getToolByName(name),
-			agentRegistry,
-			agentLifecycleManager,
+			agentRuntimeScope,
 			getSessionSpawns: () => options.spawns ?? "*",
 			getModelString: () => (hasExplicitModel && model ? formatModelString(model) : undefined),
 			getActiveModelString,
@@ -2722,6 +2719,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			advisorSharedInstructions: discoveredAdvisors.sharedInstructions,
 			advisorConfigs: discoveredAdvisors.advisors,
 			agent,
+			agentRuntimeScope,
 			pruneToolDescriptions: inlineToolDescriptors,
 			thinkingLevel: autoThinking ? AUTO_THINKING : effectiveThinkingLevel,
 			prewalk: options.prewalk,

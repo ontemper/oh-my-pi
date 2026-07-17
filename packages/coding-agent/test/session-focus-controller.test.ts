@@ -1,8 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import { SessionFocusController } from "@oh-my-pi/pi-coding-agent/modes/controllers/session-focus-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
-import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
-import { AgentRegistry, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import { type AgentRegistry, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import { AgentRuntimeScope } from "@oh-my-pi/pi-coding-agent/registry/agent-runtime-scope";
 import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 
 interface SessionStub {
@@ -93,9 +93,9 @@ function makeHarness(): Harness {
 		collabGuest: undefined,
 	} as unknown as InteractiveModeContext;
 
-	const registry = new AgentRegistry();
-	const lifecycle = new AgentLifecycleManager(registry);
-	const controller = new SessionFocusController(ctx, registry, () => lifecycle);
+	const runtimeScope = AgentRuntimeScope.create();
+	const registry = runtimeScope.registry;
+	const controller = new SessionFocusController(ctx, runtimeScope);
 
 	return {
 		ctx,

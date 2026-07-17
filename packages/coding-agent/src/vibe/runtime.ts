@@ -23,8 +23,8 @@ import type { LocalProtocolOptions } from "../internal-urls";
 import { registerArtifactsDir } from "../internal-urls/registry-helpers";
 import { MCPManager } from "../mcp/manager";
 import vibeTurnResultTemplate from "../prompts/tools/vibe-turn-result.md" with { type: "text" };
-import { AgentLifecycleManager } from "../registry/agent-lifecycle";
-import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { MAIN_AGENT_ID } from "../registry/agent-registry";
+import { AgentRuntimeScope } from "../registry/agent-runtime-scope";
 import { getBundledAgent } from "../task/agents";
 import { type ExecutorOptions, runSubagentFollowUpTurn, runSubprocess } from "../task/executor";
 import { generateTaskName } from "../task/name-generator";
@@ -83,6 +83,7 @@ interface VibeRecord {
 	cli: VibeCli;
 	ownerId: string;
 	agent: AgentDefinition;
+	runtimeScope: AgentRuntimeScope;
 	modelOverride?: string | string[];
 	state: VibeSessionState;
 	createdAt: number;
@@ -305,6 +306,7 @@ export class VibeSessionRegistry {
 			cli: args.cli,
 			ownerId: owner,
 			agent,
+			runtimeScope: session.agentRuntimeScope ?? AgentRuntimeScope.global(),
 			modelOverride,
 			state: "starting",
 			createdAt: Date.now(),
@@ -339,7 +341,7 @@ export class VibeSessionRegistry {
 		if (!message) throw new ToolError("Message must not be empty.");
 
 		if (record.turn) {
-			const live = AgentRegistry.global().get(record.id)?.session;
+			const live = record.runtimeScope.registry.get(record.id)?.session;
 			if (live?.isStreaming) {
 				await live.steer(message);
 				record.lastActivityAt = Date.now();
@@ -469,7 +471,7 @@ export class VibeSessionRegistry {
 		record.lastActivityAt = Date.now();
 		record.lastActivity = "killed";
 		try {
-			await AgentLifecycleManager.global().release(record.id);
+			await record.runtimeScope.lifecycle.release(record.id);
 		} catch (error) {
 			logger.warn("vibe: failed to release worker session", {
 				id: record.id,
@@ -504,6 +506,7 @@ export class VibeSessionRegistry {
 			description: `vibe ${record.cli} session`,
 			index: 0,
 			id: record.id,
+			agentRuntimeScope: record.runtimeScope,
 			taskDepth: session.taskDepth ?? 0,
 			detached: true,
 			modelOverride: record.modelOverride,
@@ -591,6 +594,7 @@ export class VibeSessionRegistry {
 								onProgress,
 								eventBus: session.eventBus,
 								artifactsDir: session.getSessionFile()?.slice(0, -6),
+								agentRuntimeScope: record.runtimeScope,
 							});
 					return this.#settleTurn(session, manager, record, turn, ownJobId, turnIndex, result);
 				} catch (error) {
@@ -622,7 +626,7 @@ export class VibeSessionRegistry {
 		}
 		// A spawn that failed before its session ever registered leaves nothing
 		// to continue — mark the record dead so sends fail with clear guidance.
-		record.state = AgentRegistry.global().get(record.id) ? "idle" : "dead";
+		record.state = record.runtimeScope.registry.get(record.id) ? "idle" : "dead";
 		if (record.state === "dead" || record.queue.length === 0) return;
 		const nextMessage = record.queue.splice(0, record.queue.length).join("\n\n");
 		try {

@@ -94,7 +94,7 @@ function makeGuestContext(counts: number[]): InteractiveModeContext {
 		updateEditorBorderColor: () => {},
 		eventController: { handleEvent: () => Promise.resolve() },
 		syncRunningSubagentBadge: () => {
-			const registry = getRunningSubagentBadgeRegistry(ctx.collabGuest);
+			const registry = getRunningSubagentBadgeRegistry(ctx.collabGuest, AgentRegistry.global());
 			const count = countRunningSubagentBadgeAgents(registry);
 			ctx.statusLine.setSubagentCount(count);
 			counts.push(count);

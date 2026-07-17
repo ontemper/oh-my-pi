@@ -244,7 +244,7 @@ import { GoalRuntime } from "../goals/runtime";
 import type { Goal, GoalModeState } from "../goals/state";
 import type { HindsightSessionState } from "../hindsight/state";
 import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
-import { IrcBus, type IrcMessage } from "../irc/bus";
+import type { IrcMessage } from "../irc/bus";
 import { resolveMemoryBackend } from "../memory-backend";
 import { shutdownMnemopiEmbedClient } from "../mnemopi/embed-client";
 import { getMnemopiSessionState, type MnemopiSessionState, setMnemopiSessionState } from "../mnemopi/state";
@@ -288,7 +288,7 @@ import ttsrToolReminderTemplate from "../prompts/system/ttsr-tool-reminder.md" w
 import unexpectedStopRetryTemplate from "../prompts/system/unexpected-stop-retry.md" with { type: "text" };
 import vibeModeActivePrompt from "../prompts/system/vibe-mode-active.md" with { type: "text" };
 import xdevMountNoticePrompt from "../prompts/system/xdev-mount-notice.md" with { type: "text" };
-import { AgentRegistry } from "../registry/agent-registry";
+import { AgentRuntimeScope } from "../registry/agent-runtime-scope";
 import {
 	deobfuscateAssistantContent,
 	deobfuscateSessionContext,
@@ -804,6 +804,8 @@ export interface AgentSessionConfig {
 	agent: Agent;
 	sessionManager: SessionManager;
 	settings: Settings;
+	/** Task-agent identity, lifecycle, and IRC ownership boundary. Defaults to the CLI compatibility scope. */
+	agentRuntimeScope?: AgentRuntimeScope;
 	/** Whether the caller explicitly requested yolo/auto-approve behavior for this session. */
 	autoApprove?: boolean;
 	/** Models to cycle through with Ctrl+P (from --models flag) */
@@ -1729,6 +1731,7 @@ export class AgentSession {
 	readonly agent: Agent;
 	readonly sessionManager: SessionManager;
 	readonly settings: Settings;
+	readonly agentRuntimeScope: AgentRuntimeScope;
 	/** Entries of tools mounted under `xd://`; empty when virtual devices are unmounted. */
 	getXdevToolEntries: () => Array<{ name: string; summary: string }>;
 	readonly yieldQueue: YieldQueue;
@@ -2495,6 +2498,7 @@ export class AgentSession {
 		this.agent = config.agent;
 		this.sessionManager = config.sessionManager;
 		this.settings = config.settings;
+		this.agentRuntimeScope = config.agentRuntimeScope ?? AgentRuntimeScope.global();
 		this.#autoApprove = config.autoApprove === true;
 		// Power assertions are taken per turn (see #beginInFlight); nothing acquired here.
 		this.#evalKernelOwnerId = config.evalKernelOwnerId ?? `agent-session:${Snowflake.next()}`;
@@ -15120,7 +15124,7 @@ export class AgentSession {
 		};
 		void this.#emitSessionEvent({ type: "irc_message", message: record });
 		if (this.isStreaming) {
-			const recipientParentId = AgentRegistry.global().get(msg.to)?.parentId;
+			const recipientParentId = this.agentRuntimeScope.registry.get(msg.to)?.parentId;
 			if (recipientParentId === msg.from) {
 				this.agent.steer({
 					role: "user",
@@ -15188,7 +15192,7 @@ export class AgentSession {
 			this.#pendingIrcAsides.push(record);
 			// `from` must be the id the sender addressed (msg.to) so their
 			// from-filtered waiter matches.
-			const receipt = await IrcBus.global().send({ from: msg.to, to: msg.from, body, replyTo: msg.id });
+			const receipt = await this.agentRuntimeScope.irc.send({ from: msg.to, to: msg.from, body, replyTo: msg.id });
 			if (receipt.outcome === "failed") {
 				logger.warn("IRC auto-reply delivery failed", { to: msg.from, error: receipt.error });
 			}

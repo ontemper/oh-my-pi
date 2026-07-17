@@ -34,8 +34,8 @@ import type { MCPManager } from "../mcp/manager";
 import type { MnemopiSessionState } from "../mnemopi/state";
 import subagentSystemPromptTemplate from "../prompts/system/subagent-system-prompt.md" with { type: "text" };
 import submitReminderTemplate from "../prompts/system/subagent-yield-reminder.md" with { type: "text" };
-import { AgentLifecycleManager } from "../registry/agent-lifecycle";
-import { AgentRegistry } from "../registry/agent-registry";
+import type { AgentRegistry } from "../registry/agent-registry";
+import { AgentRuntimeScope } from "../registry/agent-runtime-scope";
 import { type CreateAgentSessionOptions, createAgentSession, discoverAuthStorage } from "../sdk";
 import type { AgentSession, AgentSessionEvent, Prewalk } from "../session/agent-session";
 import type { ArtifactManager } from "../session/artifacts";
@@ -306,10 +306,8 @@ export interface ExecutorOptions {
 	 */
 	maxRuntimeMs?: number;
 	enableLsp?: boolean;
-	/** Registry the subagent registers into. Default: AgentRegistry.global(). */
-	agentRegistry?: AgentRegistry;
-	/** Lifecycle manager adopting kept-alive subagents. Default: AgentLifecycleManager.global(). */
-	agentLifecycleManager?: AgentLifecycleManager;
+	/** Task-agent identity, lifecycle, and IRC scope. Default: process-global CLI compatibility scope. */
+	agentRuntimeScope?: AgentRuntimeScope;
 	signal?: AbortSignal;
 	onProgress?: (progress: AgentProgress) => void;
 	/**
@@ -775,7 +773,7 @@ interface RunMonitorArgs {
 	softRequestBudgetNotice: boolean;
 	/** Wall-clock cap in ms; 0 disables the timer. */
 	maxRuntimeMs: number;
-	/** Receives this run's activity gists. Default: AgentRegistry.global(). */
+	/** Receives this run's activity gists. Default: process-global CLI compatibility registry. */
 	agentRegistry?: AgentRegistry;
 }
 
@@ -835,7 +833,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		softRequestBudgetNotice,
 		maxRuntimeMs,
 	} = args;
-	const agentRegistry = args.agentRegistry ?? AgentRegistry.global();
+	const agentRegistry = args.agentRegistry ?? AgentRuntimeScope.global().registry;
 	const startTime = Date.now();
 
 	const progress: AgentProgress = {
@@ -1881,12 +1879,10 @@ export async function finalizeSubagentLifecycle(args: {
 	isolated: boolean;
 	agentIdleTtlMs: number;
 	reviveSession: (() => Promise<AgentSession>) | null;
-	/** Registry the subagent was registered into. Default: AgentRegistry.global(). */
-	agentRegistry?: AgentRegistry;
-	/** Lifecycle manager that adopts kept-alive agents. Default: AgentLifecycleManager.global(). */
-	agentLifecycleManager?: AgentLifecycleManager;
+	/** Runtime scope that owns the subagent. Default: process-global CLI compatibility scope. */
+	agentRuntimeScope?: AgentRuntimeScope;
 }): Promise<void> {
-	const registry = args.agentRegistry ?? AgentRegistry.global();
+	const { registry, lifecycle } = args.agentRuntimeScope ?? AgentRuntimeScope.global();
 	const disposeSession = async (): Promise<void> => {
 		try {
 			await untilAborted(AbortSignal.timeout(5000), () => args.session.dispose());
@@ -1928,7 +1924,7 @@ export async function finalizeSubagentLifecycle(args: {
 	// Keep-alive: finished and failed subagents both stay interrogable.
 	// The lifecycle manager owns idle-TTL parking + revival from here on.
 	registry.setStatus(args.id, "idle");
-	(args.agentLifecycleManager ?? AgentLifecycleManager.global()).adopt(args.id, {
+	lifecycle.adopt(args.id, {
 		idleTtlMs: args.agentIdleTtlMs,
 		revive: args.reviveSession ?? undefined,
 	});
@@ -1952,10 +1948,8 @@ export interface FollowUpTurnOptions {
 	artifactsDir?: string;
 	/** Wall-clock cap in ms for this turn; 0 disables. */
 	maxRuntimeMs?: number;
-	/** Registry the subagent lives in. Default: AgentRegistry.global(). */
-	agentRegistry?: AgentRegistry;
-	/** Lifecycle manager that owns the subagent's park/revive. Default: AgentLifecycleManager.global(). */
-	agentLifecycleManager?: AgentLifecycleManager;
+	/** Runtime scope that owns the subagent. Default: process-global CLI compatibility scope. */
+	agentRuntimeScope?: AgentRuntimeScope;
 }
 
 /**
@@ -1965,16 +1959,15 @@ export interface FollowUpTurnOptions {
  *
  * The session's full conversation history is retained (live session, or JSONL
  * replay through the lifecycle reviver), so the turn sees all prior context.
- * Unlike {@link runSubprocess}, the session is NOT torn down afterwards — it
- * stays adopted by the {@link AgentLifecycleManager} (idle → TTL park →
- * revive), and an aborted turn only aborts the in-flight turn.
+ * The agent stays adopted by its runtime scope (idle → TTL park → revive), and
+ * an aborted turn only aborts the in-flight turn.
  */
 export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Promise<SingleResult> {
 	const { id, agent, message, signal } = options;
 	const index = options.index ?? 0;
 	const startTime = Date.now();
-	const agentRegistry = options.agentRegistry ?? AgentRegistry.global();
-	const agentLifecycleManager = options.agentLifecycleManager ?? AgentLifecycleManager.global();
+	const { registry: agentRegistry, lifecycle: agentLifecycleManager } =
+		options.agentRuntimeScope ?? AgentRuntimeScope.global();
 	const session = await agentLifecycleManager.ensureLive(id);
 	const ref = agentRegistry.get(id);
 	const sessionFile = ref?.sessionFile ?? undefined;
@@ -2064,8 +2057,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		signal,
 		onProgress,
 	} = options;
-	const agentRegistry = options.agentRegistry ?? AgentRegistry.global();
-	const agentLifecycleManager = options.agentLifecycleManager ?? AgentLifecycleManager.global();
+	const agentRuntimeScope = options.agentRuntimeScope ?? AgentRuntimeScope.global();
+	const { registry: agentRegistry } = agentRuntimeScope;
 	const startTime = Date.now();
 	// Set by the session's onFirstChatDispatch hook the first time the agent
 	// loop dispatches a chat request to the provider — the launch-complete boundary.
@@ -2420,8 +2413,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				cwd: worktree ?? cwd,
 				authStorage,
 				modelRegistry,
-				agentRegistry,
-				agentLifecycleManager,
+				agentRuntimeScope,
 				settings: subagentSettings,
 				model,
 				modelPattern: model || modelOverride === undefined ? undefined : modelPatterns,
@@ -2679,8 +2671,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				await finalizeSubagentLifecycle({
 					id,
 					session,
-					agentRegistry,
-					agentLifecycleManager,
+					agentRuntimeScope,
 					aborted,
 					abortKind: monitor.abortKind(),
 					keepAlive: options.keepAlive !== false,

@@ -5,6 +5,7 @@ import type { SettingPath } from "@oh-my-pi/pi-coding-agent/config/settings-sche
 import { IrcBus, type IrcMessage } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import { AgentRuntimeScope } from "@oh-my-pi/pi-coding-agent/registry/agent-runtime-scope";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -62,14 +63,14 @@ function makeFakeSession(): FakeSession {
 	};
 }
 
-function makeToolSession(registry: AgentRegistry, agentId: string): ToolSession {
+function makeToolSession(_registry: AgentRegistry, agentId: string): ToolSession {
 	return {
 		cwd: "/tmp",
 		hasUI: false,
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
 		settings: Settings.isolated(),
-		agentRegistry: registry,
+		agentRuntimeScope: AgentRuntimeScope.global(),
 		getAgentId: () => agentId,
 	};
 }
@@ -416,7 +417,7 @@ describe("IRC", () => {
 				getSessionFile: () => null,
 				getSessionSpawns: () => "*",
 				settings: Settings.isolated(),
-				agentRegistry: registry,
+				agentRuntimeScope: AgentRuntimeScope.global(),
 				getAgentId: () => "0-Main",
 			};
 			const tool = new HubTool(session);

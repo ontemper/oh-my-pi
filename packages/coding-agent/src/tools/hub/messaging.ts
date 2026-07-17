@@ -14,7 +14,7 @@ import { type Component, Text } from "@oh-my-pi/pi-tui";
 import { formatAge, formatDuration } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../../config/settings";
 import type { RenderResultOptions } from "../../extensibility/custom-tools/types";
-import { IrcBus, type IrcDeliveryReceipt, type IrcMessage } from "../../irc/bus";
+import type { IrcBus, IrcDeliveryReceipt, IrcMessage } from "../../irc/bus";
 import type { Theme } from "../../modes/theme/theme";
 import { type AgentRegistry, MAIN_AGENT_ID } from "../../registry/agent-registry";
 import { canSpawnAtDepth } from "../../task/types";
@@ -31,6 +31,13 @@ import {
 import { type CoordinationDetails, type HubRenderArgs, hubErrorResult } from "./types";
 
 export const DEFAULT_IRC_TIMEOUT_MS = 120_000;
+
+interface PeerMessagingDeps {
+	registry: AgentRegistry;
+	irc: IrcBus;
+	senderId: string;
+	settings: Settings;
+}
 
 /**
  * Messaging availability: there must be someone to chat with. True for every
@@ -81,8 +88,8 @@ export function messageResult(senderId: string, waited: IrcMessage): AgentToolRe
 	};
 }
 
-export function executeList(registry: AgentRegistry, senderId: string): AgentToolResult<CoordinationDetails> {
-	const bus = IrcBus.global();
+export function executeList(deps: PeerMessagingDeps): AgentToolResult<CoordinationDetails> {
+	const { registry, irc: bus, senderId } = deps;
 	const peers = registry
 		.list()
 		.filter(ref => ref.id !== senderId && ref.status !== "aborted" && ref.kind !== "advisor")
@@ -130,11 +137,11 @@ export interface HubSendParams {
 }
 
 export async function executeSend(
-	deps: { registry: AgentRegistry; senderId: string; settings: Settings },
+	deps: PeerMessagingDeps,
 	params: HubSendParams,
 	signal?: AbortSignal,
 ): Promise<AgentToolResult<CoordinationDetails>> {
-	const { registry, senderId, settings } = deps;
+	const { registry, irc: bus, senderId, settings } = deps;
 	const to = params.to?.trim();
 	const message = params.message?.trim();
 	if (!to) {
@@ -155,7 +162,6 @@ export async function executeSend(
 		});
 	}
 
-	const bus = IrcBus.global();
 	let waited: IrcMessage | null | undefined;
 	const timeoutMs = params.await ? resolveMessageTimeoutMs(settings, params.timeoutMs) : undefined;
 	const awaitAbort = params.await ? new AbortController() : undefined;
@@ -279,15 +285,15 @@ export async function executeSend(
 
 /** Pure message wait: no jobs in play, block on the bus with peer liveness. */
 export async function executeMessageWait(
-	deps: { registry: AgentRegistry; senderId: string; settings: Settings },
+	deps: PeerMessagingDeps,
 	params: { from?: string; timeoutMs?: number },
 	signal?: AbortSignal,
 ): Promise<AgentToolResult<CoordinationDetails>> {
-	const { registry, senderId, settings } = deps;
+	const { registry, irc, senderId, settings } = deps;
 	const from = params.from?.trim() || undefined;
 	const timeoutMs = resolveMessageTimeoutMs(settings, params.timeoutMs);
 	try {
-		const waited = await IrcBus.global().wait(senderId, { from }, timeoutMs, signal, {
+		const waited = await irc.wait(senderId, { from }, timeoutMs, signal, {
 			liveness: { registry, senderId },
 		});
 		if (!waited) {
@@ -308,12 +314,9 @@ export async function executeMessageWait(
 	}
 }
 
-export function executeInbox(
-	registry: AgentRegistry,
-	senderId: string,
-	peek?: boolean,
-): AgentToolResult<CoordinationDetails> {
-	const busMessages = IrcBus.global().inbox(senderId, { peek });
+export function executeInbox(deps: PeerMessagingDeps, peek?: boolean): AgentToolResult<CoordinationDetails> {
+	const { registry, irc, senderId } = deps;
+	const busMessages = irc.inbox(senderId, { peek });
 	const session = registry.get(senderId)?.session;
 	const pendingMessages =
 		typeof session?.drainPendingIrcInboxMessages === "function" ? session.drainPendingIrcInboxMessages(senderId) : [];

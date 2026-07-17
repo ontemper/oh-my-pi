@@ -59,7 +59,6 @@ import type { PrintModeOptions } from "./modes/print-mode";
 import { CURRENT_SETUP_VERSION } from "./modes/setup-version";
 import { initTheme, stopThemeWatcher } from "./modes/theme/theme";
 import type { SubmittedUserInput } from "./modes/types";
-import { AgentLifecycleManager } from "./registry/agent-lifecycle";
 import {
 	type CreateAgentSessionOptions,
 	type CreateAgentSessionResult,
@@ -1460,17 +1459,20 @@ export async function runRootCommand(
 		// Cold-revive support: a `parked` subagent ref restored from disk (Agent Hub
 		// scan, collab mirror, resumed process) has a sessionFile but no in-memory
 		// reviver, so `ensureLive` (IRC sends, hub focus) would refuse it. Install a
-		// factory — bound to THIS top-level session — that rebuilds the subagent from
-		// its persisted JSONL (see persisted-revive.ts). Scoped to the non-ACP
-		// bootstrap: ACP keeps several concurrent top-level sessions and a single
-		// process-global factory must not be clobbered by the most recent one.
-		AgentLifecycleManager.global().setPersistedSubagentReviverFactory(
+		// factory — bound to THIS top-level session and its task runtime — that
+		// rebuilds the subagent from its persisted JSONL (see persisted-revive.ts).
+		// Scoped to the non-ACP bootstrap: ACP keeps several concurrent top-level
+		// sessions on the compatibility runtime, where one factory would still be
+		// clobbered by the most recently created session.
+		session.agentRuntimeScope.lifecycle.setPersistedSubagentReviverFactory(
 			createPersistedSubagentReviverFactory({
 				session,
 				authStorage,
 				modelRegistry,
 				settings: settingsInstance,
 				enableLsp: sessionOptions.enableLsp ?? true,
+				agentRuntimeScope: session.agentRuntimeScope,
+				mcpManager,
 			}),
 			Math.trunc(Number(settingsInstance.get("task.agentIdleTtlMs") ?? 420_000) || 0),
 		);

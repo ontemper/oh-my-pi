@@ -36,6 +36,7 @@ export * from "./modes";
 export * from "./modes/components";
 // Theme utilities for custom tools
 export * from "./modes/theme/theme";
+export * from "./registry/agent-runtime-scope";
 // SDK for programmatic usage
 export * from "./sdk";
 export * from "./session/agent-session";
@@ -54,6 +55,7 @@ export * from "./session/session-migrations";
 export * from "./session/session-storage";
 export * from "./session/sql-session-storage";
 export * from "./task/executor";
+export * from "./task/persisted-revive";
 export type * from "./task/types";
 // Tools (detail types and utilities)
 export * from "./tools";

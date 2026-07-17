@@ -47,7 +47,8 @@ import "../tools/review";
 import type { AsyncJobManager } from "../async";
 import type { LocalProtocolOptions } from "../internal-urls";
 import { loadOverallPlanReference } from "../plan-mode/plan-handoff";
-import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { MAIN_AGENT_ID } from "../registry/agent-registry";
+import { AgentRuntimeScope } from "../registry/agent-runtime-scope";
 import { type DiscoveryResult, discoverAgents, getAgent } from "./discovery";
 import { runSubprocess } from "./executor";
 import {
@@ -540,6 +541,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	readonly mergeCallAndResult = true;
 	readonly #discoveredAgents: AgentDefinition[];
 	readonly #blockedAgent: string | undefined;
+	readonly #agentRuntimeScope: AgentRuntimeScope;
 	/**
 	 * One semaphore per TaskTool instance (i.e. per session): bounds concurrent
 	 * subagents across parallel `task` calls within the session. Resized in
@@ -579,11 +581,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	) {
 		this.#blockedAgent = $env.PI_BLOCKED_AGENT;
 		this.#discoveredAgents = discoveredAgents;
-	}
-
-	/** Registry this session's subagents live in. */
-	get #agentRegistry(): AgentRegistry {
-		return this.session.agentRegistry ?? AgentRegistry.global();
+		this.#agentRuntimeScope = session.agentRuntimeScope ?? AgentRuntimeScope.global();
 	}
 
 	#isBatchEnabled(): boolean {
@@ -934,7 +932,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			options;
 		const buildFollowUpHint = (aborted: boolean): string => {
 			if (aborted) {
-				const status = this.#agentRegistry.get(agentId)?.status;
+				const status = this.#agentRuntimeScope.registry.get(agentId)?.status;
 				if (status === "idle" || status === "parked") {
 					const followUp = ircEnabled ? "message it via `hub` to resume; " : "";
 					return `\n\n${agentId} was stopped but is still resumable — ${followUp}transcript at history://${agentId}`;
@@ -1028,7 +1026,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					const statusText = `Background task ${agentId} failed.`;
 					await reportProgress(statusText);
 					const message = error instanceof Error ? error.message : String(error);
-					const hint = this.#agentRegistry.get(agentId) ? buildFollowUpHint(false) : "";
+					const hint = this.#agentRuntimeScope.registry.get(agentId) ? buildFollowUpHint(false) : "";
 					throw new TaskJobError(`${message}${hint}`);
 				} finally {
 					releasePermit();
@@ -1422,8 +1420,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 
 			const sharedRunOptions = {
 				cwd: this.session.cwd,
-				agentRegistry: this.session.agentRegistry,
-				agentLifecycleManager: this.session.agentLifecycleManager,
+				agentRuntimeScope: this.#agentRuntimeScope,
 				agent: effectiveAgent,
 				task: renderSubagentUserPrompt(assignment),
 				assignment,
@@ -1587,7 +1584,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		}
 		// A stopped-but-adopted agent (soft-budget stop) stays messageable; tell
 		// the parent so it can resume via irc instead of redoing the work.
-		const refStatus = this.#agentRegistry.get(result.id)?.status;
+		const refStatus = this.#agentRuntimeScope.registry.get(result.id)?.status;
 		const resumable = result.aborted && (refStatus === "idle" || refStatus === "parked");
 		const summary = prompt.render(taskSummaryTemplate, {
 			agentName: result.agent,

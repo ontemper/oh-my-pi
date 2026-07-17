@@ -9,8 +9,8 @@
  * authoritative state.
  */
 
-import { AgentLifecycleManager } from "../../registry/agent-lifecycle";
-import { AgentRegistry, MAIN_AGENT_ID, type RegistryEvent } from "../../registry/agent-registry";
+import { type AgentRegistry, MAIN_AGENT_ID, type RegistryEvent } from "../../registry/agent-registry";
+import type { AgentRuntimeScope } from "../../registry/agent-runtime-scope";
 import type { AgentSession } from "../../session/agent-session";
 import type { InteractiveModeContext } from "../types";
 
@@ -19,12 +19,16 @@ export class SessionFocusController {
 	/** Session currently attached while focused; undefined when unfocused. */
 	#attachedSession: AgentSession | undefined;
 	#registryUnsubscribe: (() => void) | undefined;
+	readonly #registry: AgentRegistry;
+	readonly #lifecycle: AgentRuntimeScope["lifecycle"];
 
 	constructor(
 		private ctx: InteractiveModeContext,
-		private registry: AgentRegistry = AgentRegistry.global(),
-		private lifecycle: () => AgentLifecycleManager = () => AgentLifecycleManager.global(),
-	) {}
+		runtimeScope: AgentRuntimeScope = ctx.session.agentRuntimeScope,
+	) {
+		this.#registry = runtimeScope.registry;
+		this.#lifecycle = runtimeScope.lifecycle;
+	}
 
 	get focusedAgentId(): string | undefined {
 		return this.#focusedAgentId;
@@ -39,11 +43,11 @@ export class SessionFocusController {
 	async focusAgent(id: string): Promise<void> {
 		if (this.ctx.collabGuest) throw new Error("Viewing agents is unavailable in a collab session.");
 		if (id === MAIN_AGENT_ID) return this.unfocus();
-		const session = await this.lifecycle().ensureLive(id);
+		const session = await this.#lifecycle.ensureLive(id);
 		if (id === this.#focusedAgentId && session === this.#attachedSession) return;
 		this.#focusedAgentId = id;
 		this.#attachedSession = session;
-		this.#registryUnsubscribe ??= this.registry.onChange(e => this.#onRegistryEvent(e));
+		this.#registryUnsubscribe ??= this.#registry.onChange(e => this.#onRegistryEvent(e));
 		await this.#attach(session);
 		this.ctx.showStatus(`Viewing agent ${id} — Esc returns to main, ←← hops to parent`);
 	}
@@ -51,8 +55,8 @@ export class SessionFocusController {
 	/** Focus the focused agent's parent agent, falling back to the main session. No-op when unfocused. */
 	async focusParent(): Promise<void> {
 		if (!this.#focusedAgentId) return;
-		const parentId = this.registry.get(this.#focusedAgentId)?.parentId;
-		if (parentId && parentId !== MAIN_AGENT_ID && this.registry.get(parentId)) {
+		const parentId = this.#registry.get(this.#focusedAgentId)?.parentId;
+		if (parentId && parentId !== MAIN_AGENT_ID && this.#registry.get(parentId)) {
 			return this.focusAgent(parentId);
 		}
 		return this.unfocus();

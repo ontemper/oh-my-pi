@@ -27,10 +27,9 @@ import type { Component } from "@oh-my-pi/pi-tui";
 import { prompt } from "@oh-my-pi/pi-utils";
 import { type } from "arktype";
 import type { RenderResultOptions } from "../../extensibility/custom-tools/types";
-import { IrcBus } from "../../irc/bus";
 import type { Theme } from "../../modes/theme/theme";
 import hubDescription from "../../prompts/tools/hub.md" with { type: "text" };
-import type { AgentRegistry } from "../../registry/agent-registry";
+import type { AgentRuntimeScope } from "../../registry/agent-runtime-scope";
 import type { ToolSession } from "..";
 import {
 	buildJobResult,
@@ -118,7 +117,9 @@ const hubSchema = type({
 type HubParams = typeof hubSchema.infer;
 
 interface MessagingDeps {
-	registry: AgentRegistry;
+	runtimeScope: AgentRuntimeScope;
+	registry: AgentRuntimeScope["registry"];
+	irc: AgentRuntimeScope["irc"];
 	senderId: string;
 	settings: ToolSession["settings"];
 }
@@ -234,10 +235,16 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 
 	/** Messaging deps when this session can address peers; null otherwise. */
 	#messaging(): MessagingDeps | null {
-		const registry = this.session.agentRegistry;
+		const runtimeScope = this.session.agentRuntimeScope;
 		const senderId = this.session.getAgentId?.() ?? null;
-		if (!registry || !senderId) return null;
-		return { registry, senderId, settings: this.session.settings };
+		if (!runtimeScope || !senderId) return null;
+		return {
+			runtimeScope,
+			registry: runtimeScope.registry,
+			irc: runtimeScope.irc,
+			senderId,
+			settings: this.session.settings,
+		};
 	}
 
 	async execute(
@@ -251,7 +258,7 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 			case "list": {
 				const messaging = this.#messaging();
 				if (!messaging) return hubErrorResult("Peer messaging is unavailable in this session.", { op: "list" });
-				return executeList(messaging.registry, messaging.senderId);
+				return executeList(messaging);
 			}
 			case "send": {
 				const toPeer = params.to?.trim();
@@ -269,7 +276,7 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 			case "inbox": {
 				const messaging = this.#messaging();
 				if (!messaging) return hubErrorResult("Peer messaging is unavailable in this session.", { op: "inbox" });
-				return executeInbox(messaging.registry, messaging.senderId, params.peek);
+				return executeInbox(messaging, params.peek);
 			}
 			case "wait":
 				if (params.name?.trim()) return this.#launch(params, "wait", signal);
@@ -397,16 +404,13 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 		let removeBusAbortListener: (() => void) | undefined;
 		const busLeg =
 			messaging && busAbort
-				? IrcBus.global()
-						.wait(messaging.senderId, { from }, 0, busAbort.signal)
-						.then(
-							message => ({ message, error: null as Error | null }),
-							error => ({
-								message: null,
-								error:
-									error === busCancelled ? null : error instanceof Error ? error : new Error(String(error)),
-							}),
-						)
+				? messaging.irc.wait(messaging.senderId, { from }, 0, busAbort.signal).then(
+						message => ({ message, error: null as Error | null }),
+						error => ({
+							message: null,
+							error: error === busCancelled ? null : error instanceof Error ? error : new Error(String(error)),
+						}),
+					)
 				: undefined;
 		if (busLeg) racePromises.push(busLeg);
 		if (busAbort && signal) {

@@ -4,7 +4,8 @@ import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import backgroundTanDispatchPrompt from "../../prompts/system/background-tan-dispatch.md" with { type: "text" };
 import tanContextSwitchPrompt from "../../prompts/system/tan-context-switch.md" with { type: "text" };
-import { AgentRegistry, MAIN_AGENT_ID } from "../../registry/agent-registry";
+import { MAIN_AGENT_ID } from "../../registry/agent-registry";
+import { AgentRuntimeScope } from "../../registry/agent-runtime-scope";
 import * as sdk from "../../sdk";
 import type { AgentSession } from "../../session/agent-session";
 import { BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE } from "../../session/messages";
@@ -87,7 +88,8 @@ export class TanCommandController {
 		const settings = createSubagentSettings(this.ctx.settings);
 		const customTools = mcpManager ? createMCPProxyTools(mcpManager) : undefined;
 		const enableLsp = this.ctx.settings.get("task.enableLsp") !== false;
-		const agentRegistry = AgentRegistry.global();
+		const agentRuntimeScope = this.ctx.session.agentRuntimeScope ?? AgentRuntimeScope.global();
+		const agentRegistry = agentRuntimeScope.registry;
 		const cloneId = `Tan-${Snowflake.next()}`;
 		const cloneFile = path.join(sessionDir, `${cloneId}.jsonl`);
 		const label = `/tan ${previewWork(trimmedWork)}`;
@@ -130,7 +132,7 @@ export class TanCommandController {
 							agentDisplayName: "tan",
 							parentTaskPrefix: cloneId,
 							parentAgentId: ownerId,
-							agentRegistry,
+							agentRuntimeScope,
 							disableExtensionDiscovery: true,
 						});
 						clone = created.session;

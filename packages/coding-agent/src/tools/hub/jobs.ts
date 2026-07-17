@@ -87,7 +87,7 @@ export function visibleJobs(manager: AsyncJobManager, ids: string[], ownerId: st
  * job *control* stays owner-scoped.
  */
 export function runningAgentsOutsideJobs(session: ToolSession): AgentActivitySnapshot[] {
-	const registry = session.agentRegistry;
+	const registry = session.agentRuntimeScope?.registry;
 	if (!registry) return [];
 	const selfId = session.getAgentId?.() ?? undefined;
 	// Cover = the caller's RUNNING jobs only. A settled job still sitting in
@@ -242,7 +242,7 @@ export function noMatchingJobsResult(session: ToolSession, ids: string[]): Agent
 	// (task job ids are agent ids, so a stale id often names one).
 	const agents = runningAgentsOutsideJobs(session);
 	const lines: string[] = [`No matching jobs found for IDs: ${ids.join(", ")}`];
-	const registry = session.agentRegistry;
+	const registry = session.agentRuntimeScope?.registry;
 	for (const id of ids) {
 		const ref = registry?.get(id);
 		if (!ref) continue;

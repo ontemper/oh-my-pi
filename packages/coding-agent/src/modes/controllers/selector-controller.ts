@@ -1574,13 +1574,16 @@ export class SelectorController {
 			this.ctx.ui.requestRender();
 		};
 
+		const localAgentRuntime = this.ctx.collabGuest ? undefined : this.ctx.session.agentRuntimeScope;
 		hub = new AgentHubOverlayComponent({
 			observers,
 			hubKeys,
 			expandKeys: this.ctx.keybindings.getKeys("app.tools.expand"),
 			onDone: done,
 			requestRender: () => this.ctx.ui.requestRender(),
-			registry: this.ctx.collabGuest?.agentRegistry,
+			registry: this.ctx.collabGuest?.agentRegistry ?? localAgentRuntime?.registry,
+			lifecycle: localAgentRuntime?.lifecycle,
+			irc: localAgentRuntime?.irc,
 			remote: this.ctx.collabGuest?.hubRemote,
 			ui: this.ctx.ui,
 			getTool: name => this.ctx.session.getToolByName(name),

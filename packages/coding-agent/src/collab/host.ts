@@ -22,8 +22,8 @@ import type {
 	SessionEntry as WireSessionEntry,
 } from "@oh-my-pi/pi-wire";
 import type { InteractiveModeContext } from "../modes/types";
-import { AgentLifecycleManager } from "../registry/agent-lifecycle";
-import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
+import type { AgentRef } from "../registry/agent-registry";
+import { AgentRuntimeScope } from "../registry/agent-runtime-scope";
 import type { AgentSessionEvent } from "../session/agent-session";
 import { stripImagesFromMessage, USER_INTERRUPT_LABEL } from "../session/messages";
 import type { SessionEntry as StoredSessionEntry } from "../session/session-entries";
@@ -120,6 +120,7 @@ export type CollabGuestUiResult = { kind: "answered"; value: CollabUiResponseVal
 
 export class CollabHost {
 	#ctx: InteractiveModeContext;
+	readonly #agentRuntimeScope: AgentRuntimeScope;
 	#socket: CollabSocket | null = null;
 	#link = "";
 	#webLink = "";
@@ -141,6 +142,7 @@ export class CollabHost {
 
 	constructor(ctx: InteractiveModeContext) {
 		this.#ctx = ctx;
+		this.#agentRuntimeScope = ctx.session.agentRuntimeScope ?? AgentRuntimeScope.global();
 	}
 
 	get link(): string {
@@ -276,7 +278,7 @@ export class CollabHost {
 				this.#busUnsubscribers.push(bus.on(channel, data => this.#broadcast({ t: "bus", channel, data })));
 			}
 		}
-		this.#registryUnsubscribe = AgentRegistry.global().onChange(() => this.#scheduleAgentsBroadcast());
+		this.#registryUnsubscribe = this.#agentRuntimeScope.registry.onChange(() => this.#scheduleAgentsBroadcast());
 		this.#ctx.sessionManager.onEntryAppended = entry => {
 			if (isWireSessionEntry(entry)) this.#broadcast({ t: "entry", entry: shrinkForReplication(entry) });
 			// Model/thinking/title changes land as entries while idle; refresh
@@ -555,7 +557,7 @@ export class CollabHost {
 
 	#snapshotAgents(): AgentSnapshot[] {
 		return (
-			AgentRegistry.global()
+			this.#agentRuntimeScope.registry
 				.list()
 				// Advisor transcripts are local observability only; never mirror them to
 				// guests (the wire AgentSnapshot kind has no `advisor`, and guests must not
@@ -589,7 +591,7 @@ export class CollabHost {
 		}
 		// Advisor refs are excluded from snapshots, but reject control by id defensively:
 		// a stale/malicious client must never chat/kill/revive a read-only advisor transcript.
-		if (AgentRegistry.global().get(agentId)?.kind === "advisor") {
+		if (this.#agentRuntimeScope.registry.get(agentId)?.kind === "advisor") {
 			this.#socket?.send({ t: "error", message: `agent ${agentId}: advisor transcripts are read-only` }, fromPeer);
 			return;
 		}
@@ -605,7 +607,7 @@ export class CollabHost {
 					return;
 				}
 				// Mirrors the hub's #submitChatMessage: revive if parked, steer if mid-turn.
-				AgentLifecycleManager.global()
+				this.#agentRuntimeScope.lifecycle
 					.ensureLive(agentId)
 					.then(session => session.prompt(trimmed, { streamingBehavior: "steer" }))
 					.catch(fail);
@@ -613,17 +615,17 @@ export class CollabHost {
 			}
 			case "kill": {
 				const kill = async () => {
-					const ref = AgentRegistry.global().get(agentId);
+					const ref = this.#agentRuntimeScope.registry.get(agentId);
 					if (ref && ref.status === "running" && ref.session) {
 						await ref.session.abort({ reason: USER_INTERRUPT_LABEL });
 					}
-					await AgentLifecycleManager.global().release(agentId);
+					await this.#agentRuntimeScope.lifecycle.release(agentId);
 				};
 				kill().catch(fail);
 				break;
 			}
 			case "revive":
-				AgentLifecycleManager.global().ensureLive(agentId).catch(fail);
+				this.#agentRuntimeScope.lifecycle.ensureLive(agentId).catch(fail);
 				break;
 		}
 	}
@@ -632,7 +634,7 @@ export class CollabHost {
 	async #handleFetchTranscript(reqId: number, agentId: string, fromByte: number, fromPeer: number): Promise<void> {
 		const reply = (text: string, newSize: number, error?: string) =>
 			this.#socket?.send({ t: "transcript", reqId, text, newSize, error }, fromPeer);
-		const file = AgentRegistry.global().get(agentId)?.sessionFile;
+		const file = this.#agentRuntimeScope.registry.get(agentId)?.sessionFile;
 		if (!file) {
 			reply("", fromByte, "no transcript available");
 			return;

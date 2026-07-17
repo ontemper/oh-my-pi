@@ -6,6 +6,7 @@ import * as pythonExecutor from "@oh-my-pi/pi-coding-agent/eval/py/executor";
 import type { PythonKernel as PythonKernelInstance } from "@oh-my-pi/pi-coding-agent/eval/py/kernel";
 import * as pythonKernel from "@oh-my-pi/pi-coding-agent/eval/py/kernel";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import { AgentRuntimeScope } from "@oh-my-pi/pi-coding-agent/registry/agent-runtime-scope";
 import { createAgentSession, type ExtensionFactory, type WorkspaceTree } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -284,7 +285,7 @@ describe("AgentSession python cleanup", () => {
 				enableLsp: false,
 				toolNames: ["eval"],
 				workspaceTree: emptyWorkspaceTree(cwd),
-				agentRegistry: throwingRegistry,
+				agentRuntimeScope: AgentRuntimeScope.create(throwingRegistry),
 			}),
 		).rejects.toThrow("Agent registry failed");
 
